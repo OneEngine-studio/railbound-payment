@@ -1,0 +1,4 @@
+node_modules/
+backend/target/
+local-data/
+.env
