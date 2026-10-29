@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: railbound-mongo-rs
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
+    ports:
+      - "27018:27018"
+    volumes:
+      - D:/MyProjects/railbound-asset-portal/local-data/mongo:/data/db
+      - D:/MyProjects/railbound-asset-portal/local-logs:/var/log/mongodb
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27018", "--eval", "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:27018'}]}).ok }"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: railbound-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_PORT=8080
+      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27018/railbound_portal?replicaSet=rs0
+      - APP_JWT_SECRET=railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal
+      - APP_INTERNAL_SERVICE_KEY=svc_internal_railbound_secret_key_8829
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    container_name: railbound-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1
+    depends_on:
+      - backend
