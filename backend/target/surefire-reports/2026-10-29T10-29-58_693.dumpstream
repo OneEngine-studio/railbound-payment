@@ -1,0 +1,5 @@
+# Created at 2026-10-29T10:29:58.834
+Boot Manifest-JAR contains absolute paths in classpath 'D:\MyProjects\railbound-asset-portal\backend\target\test-classes'
+Hint: <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
+'other' has different root
+

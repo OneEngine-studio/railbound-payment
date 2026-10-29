@@ -1,0 +1,35 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: railbound-portal-backend
+  data:
+    mongodb:
+      uri: mongodb://127.0.0.1:27018/railbound_portal?replicaSet=rs0
+      auto-index-creation: true
+
+app:
+  jwt:
+    secret: "railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal"
+    expiration-ms: 86400000 # 24 hours
+  internal:
+    service-key: "svc_internal_railbound_secret_key_8829"
+  payment:
+    mock:
+      secret: "mock_webhook_secret_key_99182"
+      checkout-base-url: "http://localhost:3000/checkout/hosted-mock"
+
+logging:
+  level:
+    root: INFO
+    com.railbound.portal: DEBUG
+    org.springframework.data.mongodb: INFO
+  file:
+    name: D:/MyProjects/railbound-asset-portal/local-logs/backend.log
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
