@@ -46,7 +46,7 @@ namespace Railbound.Economy
             }
 
             string idempotencyKey = "unity_" + Guid.NewGuid().ToString("N");
-            string payload = $"{{\"bundleSku\":\"{bundleSku}\",\"provider\":\"mock\"}}";
+            string payload = $"{{\"bundleSku\":\"{bundleSku}\",\"provider\":\"payhere\"}}";
 
             Debug.Log($"[PaymentManager] Initiating checkout for {bundleSku}...");
             var response = await RailboundApiClient.Instance.PostAsync<CheckoutSessionDto>(

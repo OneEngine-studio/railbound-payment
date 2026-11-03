@@ -56,6 +56,24 @@ public class GlobalExceptionHandler {
                 .body(new ApiError("INVALID_STATE", ex.getMessage(), correlationId));
     }
 
+    @ExceptionHandler(PaymentConfigurationException.class)
+    public ResponseEntity<ApiError> handlePaymentConfiguration(PaymentConfigurationException ex) {
+        String correlationId = UUID.randomUUID().toString();
+        log.error("[{}] Payment provider is not configured: {}", correlationId, ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(new ApiError("PAYMENT_NOT_CONFIGURED", ex.getMessage(), correlationId));
+    }
+
+    @ExceptionHandler(PaymentProviderException.class)
+    public ResponseEntity<ApiError> handlePaymentProvider(PaymentProviderException ex) {
+        String correlationId = UUID.randomUUID().toString();
+        log.error("[{}] Payment provider error: {}", correlationId, ex.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .body(new ApiError("PAYMENT_PROVIDER_ERROR",
+                        "The payment provider could not complete the request. Please retry or contact support.",
+                        correlationId));
+    }
+
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException ex) {
         String correlationId = UUID.randomUUID().toString();

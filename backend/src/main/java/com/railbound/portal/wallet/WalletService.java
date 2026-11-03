@@ -87,6 +87,16 @@ public class WalletService {
      */
     @Transactional
     public Wallet debitRealCoins(String userId, long amount, String referenceType, String referenceId, String description) {
+        return debitRealCoins(userId, amount, LedgerEntryType.PURCHASE, referenceType, referenceId, description);
+    }
+
+    /**
+     * Same atomic debit, but with an explicit ledger type so refunds and
+     * administrative adjustments remain distinguishable in the immutable ledger.
+     */
+    @Transactional
+    public Wallet debitRealCoins(String userId, long amount, LedgerEntryType type,
+                                 String referenceType, String referenceId, String description) {
         if (amount <= 0) {
             throw new IllegalArgumentException("Debit amount must be strictly positive");
         }
@@ -105,7 +115,7 @@ public class WalletService {
         WalletLedgerEntry entry = new WalletLedgerEntry(
                 entryId,
                 userId,
-                LedgerEntryType.PURCHASE,
+                type,
                 -amount,
                 newBalance,
                 referenceType,
@@ -114,7 +124,8 @@ public class WalletService {
         );
         ledgerRepository.save(entry);
 
-        log.info("Authoritatively debited {} Real Coins from user {}. New balance: {}", amount, userId, newBalance);
+        log.info("Authoritatively debited {} Real Coins from user {} ({}). New balance: {}",
+                amount, userId, type, newBalance);
         return wallet;
     }
 

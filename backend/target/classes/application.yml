@@ -1,24 +1,54 @@
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
 
 spring:
   application:
     name: railbound-portal-backend
   data:
     mongodb:
-      uri: mongodb://127.0.0.1:27018/railbound_portal?replicaSet=rs0
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://127.0.0.1:27018/railbound_portal?replicaSet=rs0}
       auto-index-creation: true
 
 app:
   jwt:
-    secret: "railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal"
+    secret: ${JWT_SECRET:railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal}
     expiration-ms: 86400000 # 24 hours
   internal:
-    service-key: "svc_internal_railbound_secret_key_8829"
+    service-key: ${INTERNAL_SERVICE_KEY:svc_internal_railbound_secret_key_8829}
+  security:
+    # Comma-separated origin patterns allowed to call the API. Add the deployed
+    # portal origin (and any Unity WebGL origin) here. Never use "*" with
+    # credentials in production.
+    allowed-origin-patterns: ${CORS_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,http://127.0.0.1:3000}
   payment:
+    # PayHere is the production/default provider. The mock adapter must never be
+    # enabled in a real deployment.
+    default-provider: ${PAYMENT_DEFAULT_PROVIDER:payhere}
+    # Public HTTPS origin that PayHere can reach for notify_url. For local
+    # testing use a tunnel (Cloudflare Tunnel/ngrok) because localhost is not
+    # reachable by PayHere.
+    public-base-url: ${PAYMENT_PUBLIC_BASE_URL:http://localhost:8080}
+    frontend-base-url: ${PAYMENT_FRONTEND_BASE_URL:http://localhost:3000}
     mock:
-      secret: "mock_webhook_secret_key_99182"
-      checkout-base-url: "http://localhost:3000/checkout/hosted-mock"
+      enabled: ${APP_PAYMENT_MOCK_ENABLED:false}
+      secret: ${MOCK_GATEWAY_SECRET:mock_webhook_secret_key_99182}
+      checkout-base-url: ${GATEWAY_CHECKOUT_BASE_URL:http://localhost:3000/checkout/hosted-mock}
+    payhere:
+      # Checkout API credentials from PayHere Portal > Integrations.
+      merchant-id: ${PAYHERE_MERCHANT_ID:}
+      merchant-secret: ${PAYHERE_MERCHANT_SECRET:}
+      # Merchant API credentials from PayHere Portal > Settings > API Keys.
+      # Only needed for reconciliation and refunds.
+      app-id: ${PAYHERE_APP_ID:}
+      app-secret: ${PAYHERE_APP_SECRET:}
+      sandbox: ${PAYHERE_SANDBOX:true}
+      currency: ${PAYHERE_CURRENCY:USD}
+      live-checkout-url: https://www.payhere.lk/pay/checkout
+      sandbox-checkout-url: https://sandbox.payhere.lk/pay/checkout
+      live-api-base-url: https://www.payhere.lk
+      sandbox-api-base-url: https://sandbox.payhere.lk
+      connect-timeout-ms: 5000
+      read-timeout-ms: 15000
 
 logging:
   level:

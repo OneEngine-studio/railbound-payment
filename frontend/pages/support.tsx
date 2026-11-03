@@ -43,7 +43,10 @@ export default function SupportPage() {
               Webhook Delays & Reconciliation
             </h2>
             <p>
-              Under extreme network latency, hosted payment gateways may delay callback delivery. Our background reconciliation job polls provider transaction ledgers every 60 minutes to resolve and credit pending orders automatically.
+              Under extreme network latency, PayHere may delay callback delivery. Your order remains
+              <span className="font-mono"> PROCESSING</span> until the signed callback or a finance-team
+              reconciliation against PayHere&apos;s Retrieval API confirms the payment. Coins are never granted
+              from a browser redirect.
             </p>
           </div>
 

@@ -1,0 +1,42 @@
+# Test configuration.
+# The mock provider is enabled ONLY here so existing wallet/ledger regression
+# tests can run without a real gateway. Production defaults remain PayHere-only.
+server:
+  port: 0
+
+spring:
+  application:
+    name: railbound-portal-backend-test
+  data:
+    mongodb:
+      uri: mongodb://127.0.0.1:27018/railbound_portal?replicaSet=rs0
+      auto-index-creation: true
+
+app:
+  jwt:
+    secret: "railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal"
+    expiration-ms: 86400000
+  internal:
+    service-key: "svc_internal_railbound_secret_key_8829"
+  payment:
+    default-provider: payhere
+    public-base-url: http://localhost:8080
+    frontend-base-url: http://localhost:3000
+    mock:
+      enabled: true
+      secret: test_mock_webhook_secret
+      checkout-base-url: http://localhost:3000/checkout/hosted-mock
+    payhere:
+      merchant-id: "1211149"
+      merchant-secret: "sandbox_secret_123"
+      app-id: ""
+      app-secret: ""
+      sandbox: true
+      currency: USD
+
+logging:
+  file:
+    name: ""
+  level:
+    root: INFO
+    com.railbound.portal: DEBUG

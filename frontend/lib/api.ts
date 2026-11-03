@@ -61,6 +61,9 @@ export async function apiRequest<T = any>(
 }
 
 // API methods
+export const PAYMENT_PROVIDER = process.env.NEXT_PUBLIC_PAYMENT_PROVIDER || "payhere";
+export const MOCK_PAYMENTS_ENABLED = process.env.NEXT_PUBLIC_ENABLE_MOCK_PAYMENTS === "true";
+
 export const api = {
   // Auth
   getMe: () => apiRequest("/auth/me"),
@@ -79,7 +82,7 @@ export const api = {
   getBundles: () => apiRequest("/coin-bundles"),
 
   // Payments
-  createCheckoutSession: (bundleSku: string, provider = "mock", idempotencyKey?: string) =>
+  createCheckoutSession: (bundleSku: string, provider = PAYMENT_PROVIDER, idempotencyKey?: string) =>
     apiRequest("/payments/checkout-sessions", {
       method: "POST",
       body: JSON.stringify({ bundleSku, provider }),
@@ -87,6 +90,8 @@ export const api = {
     }),
   getOrder: (orderId: string) => apiRequest(`/payments/orders/${orderId}`),
   getMyOrders: () => apiRequest("/payments/orders"),
+  getHostedCheckout: (orderId: string, token: string) =>
+    apiRequest(`/payments/hosted/${orderId}?token=${encodeURIComponent(token)}`),
   mockCompleteOrder: (orderId: string) =>
     apiRequest(`/payments/mock-complete/${orderId}`, { method: "POST" }),
 
@@ -126,6 +131,14 @@ export const api = {
   // Admin
   adminGetSummary: () => apiRequest("/admin/analytics/summary"),
   adminGetOrders: () => apiRequest("/admin/orders"),
+  adminReconcileOrder: (orderId: string) =>
+    apiRequest(`/admin/payments/${orderId}/reconcile`, { method: "POST" }),
+  adminGetRefunds: () => apiRequest("/admin/refunds"),
+  adminRequestRefund: (orderId: string, reason: string) =>
+    apiRequest("/admin/refunds", {
+      method: "POST",
+      body: JSON.stringify({ orderId, reason }),
+    }),
   adminGetPlayers: () => apiRequest("/admin/players"),
   adminGetAuditLogs: () => apiRequest("/admin/audit-logs"),
   adminGetItems: () => apiRequest("/admin/items"),

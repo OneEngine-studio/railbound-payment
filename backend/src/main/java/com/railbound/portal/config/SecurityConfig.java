@@ -1,6 +1,7 @@
 package com.railbound.portal.config;
 
 import com.railbound.portal.security.JwtAuthenticationFilter;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -23,9 +24,17 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthFilter;
+    private final List<String> allowedOriginPatterns;
 
-    public SecurityConfig(JwtAuthenticationFilter jwtAuthFilter) {
+    public SecurityConfig(
+            JwtAuthenticationFilter jwtAuthFilter,
+            @Value("${app.security.allowed-origin-patterns:http://localhost:3000,http://127.0.0.1:3000}")
+            String allowedOriginPatterns) {
         this.jwtAuthFilter = jwtAuthFilter;
+        this.allowedOriginPatterns = java.util.Arrays.stream(allowedOriginPatterns.split(","))
+                .map(String::trim)
+                .filter(pattern -> !pattern.isEmpty())
+                .toList();
     }
 
     @Bean
@@ -46,10 +55,16 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/v1/game/config").permitAll()
                         .requestMatchers("/api/v1/auth/mock-token").permitAll()
                         .requestMatchers("/api/v1/payments/webhooks/**").permitAll()
+                        // Token-gated hosted checkout bridge opened in an external browser.
+                        .requestMatchers(HttpMethod.GET, "/api/v1/payments/hosted/**").permitAll()
                         .requestMatchers("/api/v1/payments/mock-complete/**").permitAll()
                         .requestMatchers("/api/v1/internal/**").permitAll()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/api-docs/**", "/actuator/**").permitAll()
-                        
+
+                        // Finance operations (reconciliation/refunds/order oversight)
+                        .requestMatchers("/api/v1/admin/refunds/**", "/api/v1/admin/payments/**", "/api/v1/admin/orders/**")
+                        .hasAnyRole("ADMIN", "SUPER_ADMIN", "FINANCE_SUPPORT")
+
                         // Admin restricted operations
                         .requestMatchers("/api/v1/admin/**").hasAnyRole("ADMIN", "CONTENT_MANAGER", "SUPER_ADMIN")
                         
@@ -64,7 +79,7 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOriginPatterns(List.of("http://localhost:3000", "http://127.0.0.1:3000"));
+        config.setAllowedOriginPatterns(allowedOriginPatterns);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setExposedHeaders(List.of("Authorization", "Idempotency-Key", "X-Correlation-Id"));

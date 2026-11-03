@@ -1,7 +1,9 @@
-# Railbound Battle Royale — Asset Portal
+# Railbound Battle Royale - Asset Portal
 # Root .gitignore: Next.js, Spring Boot, Unity/Nakama, MongoDB, Docker
 
+# ---------------------------------------------------------------------------
 # Secrets and local configuration (keep safe templates tracked)
+# ---------------------------------------------------------------------------
 .env
 .env.*
 !.env.example
@@ -22,7 +24,9 @@ application-local.properties
 secrets/
 credentials/
 
+# ---------------------------------------------------------------------------
 # Node.js / Next.js
+# ---------------------------------------------------------------------------
 node_modules/
 .next/
 .nuxt/
@@ -42,7 +46,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# ---------------------------------------------------------------------------
 # Java / Spring Boot / Maven / Gradle
+# ---------------------------------------------------------------------------
 target/
 .gradle/
 .gradle-cache/
@@ -55,7 +61,9 @@ hs_err_pid*
 replay_pid*
 .mvn/timing.properties
 
+# ---------------------------------------------------------------------------
 # IDE and OS files
+# ---------------------------------------------------------------------------
 .idea/
 *.iml
 .vscode/*
@@ -71,7 +79,9 @@ Desktop.ini
 *.swo
 *~
 
+# ---------------------------------------------------------------------------
 # Unity (only if Unity project is stored within this repository)
+# ---------------------------------------------------------------------------
 [Ll]ibrary/
 [Tt]emp/
 [Oo]bj/
@@ -97,10 +107,13 @@ Desktop.ini
 *.unitypackage
 # Track Unity .meta files and ProjectSettings; do NOT ignore them.
 
+# ---------------------------------------------------------------------------
 # MongoDB / local persistent volumes / backups
+# ---------------------------------------------------------------------------
 mongodb-data/
 mongo-data/
 local-data/
+local-logs/
 db-data/
 volumes/
 backups/
@@ -110,7 +123,9 @@ backups/
 mongod.lock
 WiredTiger*
 
+# ---------------------------------------------------------------------------
 # Generated game asset packages and caches (keep source assets in Git or Git LFS)
+# ---------------------------------------------------------------------------
 *.bundle
 *.assetbundle
 *.unity3d
@@ -119,7 +134,9 @@ asset-bundles/
 content-builds/
 cdn-staging/
 
+# ---------------------------------------------------------------------------
 # Logs, runtime and test artifacts
+# ---------------------------------------------------------------------------
 *.log
 logs/
 tmp/
@@ -132,7 +149,9 @@ blob-report/
 *.pid
 *.seed
 
+# ---------------------------------------------------------------------------
 # Local Docker / Terraform / deployment state
+# ---------------------------------------------------------------------------
 .docker/
 .terraform/
 *.tfstate
@@ -142,7 +161,9 @@ blob-report/
 !*.tfvars.example
 crash.log
 
+# ---------------------------------------------------------------------------
 # Certificates and payment test outputs
+# ---------------------------------------------------------------------------
 *.crt
 *.cer
 payment-webhook-dumps/

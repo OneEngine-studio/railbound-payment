@@ -29,10 +29,27 @@ public class PaymentOrder {
     private long amountMinor;
     private String currency;
 
-    private String provider; // "mock", "stripe", "xsolla"
+    private String provider; // "payhere" (default), "mock" (local development only)
 
     @Indexed(sparse = true)
     private String providerSessionId;
+
+    /**
+     * Opaque, single-use token embedded in the backend-hosted checkout bridge URL.
+     * It lets a browser/Unity open the checkout without a bearer token while
+     * preventing order enumeration.
+     */
+    @Indexed(sparse = true)
+    private String checkoutToken;
+
+    /** Stored checkout destination (backend bridge URL or mock page). */
+    private String checkoutUrl;
+
+    /** Provider payment reference used for refunds/reconciliation (PayHere payment_id). */
+    private String providerPaymentId;
+
+    /** Last raw provider status code, retained for support diagnostics. */
+    private String providerStatusCode;
 
     private PaymentOrderStatus status;
     private String idempotencyKey;
@@ -40,6 +57,7 @@ public class PaymentOrder {
     private Instant createdAt;
     private Instant expiresAt;
     private Instant completedAt;
+    private Instant refundedAt;
 
     public PaymentOrder() {
         this.createdAt = Instant.now();
@@ -147,6 +165,46 @@ public class PaymentOrder {
 
     public void setIdempotencyKey(String idempotencyKey) {
         this.idempotencyKey = idempotencyKey;
+    }
+
+    public String getCheckoutToken() {
+        return checkoutToken;
+    }
+
+    public void setCheckoutToken(String checkoutToken) {
+        this.checkoutToken = checkoutToken;
+    }
+
+    public String getCheckoutUrl() {
+        return checkoutUrl;
+    }
+
+    public void setCheckoutUrl(String checkoutUrl) {
+        this.checkoutUrl = checkoutUrl;
+    }
+
+    public String getProviderPaymentId() {
+        return providerPaymentId;
+    }
+
+    public void setProviderPaymentId(String providerPaymentId) {
+        this.providerPaymentId = providerPaymentId;
+    }
+
+    public String getProviderStatusCode() {
+        return providerStatusCode;
+    }
+
+    public void setProviderStatusCode(String providerStatusCode) {
+        this.providerStatusCode = providerStatusCode;
+    }
+
+    public Instant getRefundedAt() {
+        return refundedAt;
+    }
+
+    public void setRefundedAt(Instant refundedAt) {
+        this.refundedAt = refundedAt;
     }
 
     public Instant getCreatedAt() {
