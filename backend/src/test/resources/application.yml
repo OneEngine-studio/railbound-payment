@@ -16,8 +16,32 @@ app:
   jwt:
     secret: "railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal"
     expiration-ms: 86400000
+  auth:
+    mock-login-enabled: true
+  nakama:
+    server-key: "defaultkey"
+    token-verification-enabled: true
+    notification-webhook-url: ""
   internal:
     service-key: "svc_internal_railbound_secret_key_8829"
+  security:
+    rate-limit:
+      enabled: false
+  storage:
+    local-root: "local-data/test-media"
+    max-image-bytes: 5242880
+    max-bundle-bytes: 52428800
+  content:
+    manifest-version: 1.0.0
+  game:
+    minimum-client-version: 1.0.0
+  outbox:
+    # Disabled so background delivery never races an assertion; tests call
+    # OutboxRelay.relayOnce() explicitly.
+    enabled: false
+  payments:
+    reconciliation:
+      enabled: false
   payment:
     default-provider: payhere
     public-base-url: http://localhost:8080

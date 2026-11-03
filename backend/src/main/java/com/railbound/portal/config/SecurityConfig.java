@@ -1,6 +1,7 @@
 package com.railbound.portal.config;
 
 import com.railbound.portal.security.JwtAuthenticationFilter;
+import com.railbound.portal.security.RateLimitFilter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -24,13 +25,16 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthFilter;
+    private final RateLimitFilter rateLimitFilter;
     private final List<String> allowedOriginPatterns;
 
     public SecurityConfig(
             JwtAuthenticationFilter jwtAuthFilter,
+            RateLimitFilter rateLimitFilter,
             @Value("${app.security.allowed-origin-patterns:http://localhost:3000,http://127.0.0.1:3000}")
             String allowedOriginPatterns) {
         this.jwtAuthFilter = jwtAuthFilter;
+        this.rateLimitFilter = rateLimitFilter;
         this.allowedOriginPatterns = java.util.Arrays.stream(allowedOriginPatterns.split(","))
                 .map(String::trim)
                 .filter(pattern -> !pattern.isEmpty())
@@ -54,10 +58,14 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/v1/game/releases/latest").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/game/config").permitAll()
                         .requestMatchers("/api/v1/auth/mock-token").permitAll()
+                        .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/auth/nakama").permitAll()
                         .requestMatchers("/api/v1/payments/webhooks/**").permitAll()
                         // Token-gated hosted checkout bridge opened in an external browser.
                         .requestMatchers(HttpMethod.GET, "/api/v1/payments/hosted/**").permitAll()
                         .requestMatchers("/api/v1/payments/mock-complete/**").permitAll()
+                        // Upload grants are capabilities; previews are public media.
+                        .requestMatchers(HttpMethod.PUT, "/api/v1/uploads/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/v1/media/**").permitAll()
                         .requestMatchers("/api/v1/internal/**").permitAll()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/api-docs/**", "/actuator/**").permitAll()
 
@@ -71,7 +79,9 @@ public class SecurityConfig {
                         // All player authenticated endpoints
                         .anyRequest().authenticated()
                 )
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                // Runs after authentication so the limiter can key on the player id.
+                .addFilterAfter(rateLimitFilter, JwtAuthenticationFilter.class);
 
         return http.build();
     }

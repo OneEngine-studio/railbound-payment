@@ -13,6 +13,16 @@ app:
   jwt:
     secret: ${JWT_SECRET:railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal}
     expiration-ms: 86400000 # 24 hours
+  auth:
+    # Demo login that mints a session for a Nakama user id. Must be false in any
+    # public deployment; real players sign in through POST /auth/nakama.
+    mock-login-enabled: ${APP_AUTH_MOCK_LOGIN_ENABLED:true}
+  nakama:
+    # Shared Nakama server key used to verify game session tokens (HS256).
+    server-key: ${NAKAMA_SERVER_KEY:defaultkey}
+    token-verification-enabled: ${NAKAMA_TOKEN_VERIFICATION_ENABLED:true}
+    # Optional webhook that pushes live notifications to online Unity clients.
+    notification-webhook-url: ${NAKAMA_NOTIFICATION_WEBHOOK_URL:}
   internal:
     service-key: ${INTERNAL_SERVICE_KEY:svc_internal_railbound_secret_key_8829}
   security:
@@ -20,6 +30,35 @@ app:
     # portal origin (and any Unity WebGL origin) here. Never use "*" with
     # credentials in production.
     allowed-origin-patterns: ${CORS_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,http://127.0.0.1:3000}
+    rate-limit:
+      enabled: ${RATE_LIMIT_ENABLED:true}
+      auth-per-minute: ${RATE_LIMIT_AUTH_PER_MINUTE:30}
+      auth-burst: ${RATE_LIMIT_AUTH_BURST:15}
+      checkout-per-minute: ${RATE_LIMIT_CHECKOUT_PER_MINUTE:30}
+      checkout-burst: ${RATE_LIMIT_CHECKOUT_BURST:10}
+      write-per-minute: ${RATE_LIMIT_WRITE_PER_MINUTE:120}
+      write-burst: ${RATE_LIMIT_WRITE_BURST:40}
+      # Single-node buckets. Use Redis for a multi-instance deployment.
+  storage:
+    # D-drive local media root for previews and content bundles.
+    local-root: ${MEDIA_STORAGE_ROOT:local-data/media}
+    max-image-bytes: ${MEDIA_MAX_IMAGE_BYTES:5242880}
+    max-bundle-bytes: ${MEDIA_MAX_BUNDLE_BYTES:52428800}
+  content:
+    manifest-version: ${CONTENT_MANIFEST_VERSION:1.0.0}
+  game:
+    minimum-client-version: ${GAME_MINIMUM_CLIENT_VERSION:1.0.0}
+  outbox:
+    # Transactional outbox relay (player notifications + Nakama push).
+    enabled: ${OUTBOX_ENABLED:true}
+    initial-delay-ms: ${OUTBOX_INITIAL_DELAY_MS:15000}
+    relay-interval-ms: ${OUTBOX_RELAY_INTERVAL_MS:5000}
+  payments:
+    reconciliation:
+      # Safety net for paid-but-unfulfilled and stale orders.
+      enabled: ${PAYMENT_RECONCILIATION_ENABLED:true}
+      initial-delay-ms: ${PAYMENT_RECONCILIATION_INITIAL_DELAY_MS:60000}
+      interval-ms: ${PAYMENT_RECONCILIATION_INTERVAL_MS:900000}
   payment:
     # PayHere is the production/default provider. The mock adapter must never be
     # enabled in a real deployment.

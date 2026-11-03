@@ -9,6 +9,7 @@ import com.railbound.portal.common.PaymentConfigurationException;
 import com.railbound.portal.common.ResourceNotFoundException;
 import com.railbound.portal.identity.User;
 import com.railbound.portal.identity.UserRepository;
+import com.railbound.portal.outbox.OutboxService;
 import com.railbound.portal.wallet.WalletService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +62,7 @@ public class PaymentService {
     private final WalletService walletService;
     private final UserRepository userRepository;
     private final PayHereMerchantApiClient payHereMerchantApiClient;
+    private final OutboxService outboxService;
     private final Map<String, PaymentGatewayAdapter> adapters;
     private final TransactionTemplate transactionTemplate;
     private final String defaultProvider;
@@ -74,6 +76,7 @@ public class PaymentService {
             WalletService walletService,
             UserRepository userRepository,
             PayHereMerchantApiClient payHereMerchantApiClient,
+            OutboxService outboxService,
             List<PaymentGatewayAdapter> adapterList,
             PlatformTransactionManager transactionManager,
             @Value("${app.payment.default-provider:payhere}") String defaultProvider,
@@ -85,6 +88,7 @@ public class PaymentService {
         this.walletService = walletService;
         this.userRepository = userRepository;
         this.payHereMerchantApiClient = payHereMerchantApiClient;
+        this.outboxService = outboxService;
         this.adapters = new LinkedHashMap<>();
         for (PaymentGatewayAdapter adapter : adapterList) {
             adapters.put(adapter.getProviderName().toLowerCase(Locale.ROOT), adapter);
@@ -339,6 +343,20 @@ public class PaymentService {
                         "PROCESSED",
                         notification.sanitizedPayload()
                 ));
+
+                // Outbox row shares the transaction with the credit: the player is
+                // notified only for a credit that actually committed.
+                outboxService.enqueue(
+                        OutboxService.WALLET_CREDITED,
+                        "payment_order",
+                        order.getOrderId(),
+                        Map.of(
+                                "userId", order.getUserId(),
+                                "coins", order.getCoinsToCredit(),
+                                "orderId", order.getOrderId(),
+                                "provider", provider
+                        )
+                );
 
                 log.info("Fulfilled {} top-up order {}: +{} RC to user {} (paymentId={})",
                         provider, order.getOrderId(), order.getCoinsToCredit(),

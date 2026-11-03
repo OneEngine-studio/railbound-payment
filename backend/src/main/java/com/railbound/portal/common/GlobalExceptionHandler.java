@@ -56,6 +56,22 @@ public class GlobalExceptionHandler {
                 .body(new ApiError("INVALID_STATE", ex.getMessage(), correlationId));
     }
 
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ApiError> handleIllegalArgument(IllegalArgumentException ex) {
+        String correlationId = UUID.randomUUID().toString();
+        log.warn("[{}] Invalid request: {}", correlationId, ex.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ApiError("INVALID_REQUEST", ex.getMessage(), correlationId));
+    }
+
+    @ExceptionHandler(org.springframework.web.HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ApiError> handleMethodNotSupported(
+            org.springframework.web.HttpRequestMethodNotSupportedException ex) {
+        String correlationId = UUID.randomUUID().toString();
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .body(new ApiError("METHOD_NOT_ALLOWED", ex.getMessage(), correlationId));
+    }
+
     @ExceptionHandler(PaymentConfigurationException.class)
     public ResponseEntity<ApiError> handlePaymentConfiguration(PaymentConfigurationException ex) {
         String correlationId = UUID.randomUUID().toString();

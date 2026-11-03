@@ -1,2 +1,3 @@
 com\railbound\portal\payments\PayHereAdapterTest.class
+com\railbound\portal\PortalCompletionTests.class
 com\railbound\portal\payments\PayHerePaymentFlowTests.class

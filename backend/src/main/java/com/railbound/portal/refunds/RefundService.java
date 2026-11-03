@@ -4,7 +4,9 @@ import com.railbound.portal.common.DuplicateResourceException;
 import com.railbound.portal.common.InvalidStateException;
 import com.railbound.portal.common.PaymentProviderException;
 import com.railbound.portal.common.ResourceNotFoundException;
+import com.railbound.portal.audit.AuditService;
 import com.railbound.portal.ledger.LedgerEntryType;
+import com.railbound.portal.outbox.OutboxService;
 import com.railbound.portal.payments.PayHereMerchantApiClient;
 import com.railbound.portal.payments.PaymentOrder;
 import com.railbound.portal.payments.PaymentOrderRepository;
@@ -20,6 +22,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -46,6 +49,8 @@ public class RefundService {
     private final RefundCaseRepository refundRepository;
     private final PayHereMerchantApiClient payHereClient;
     private final WalletService walletService;
+    private final OutboxService outboxService;
+    private final AuditService auditService;
     private final TransactionTemplate transactionTemplate;
 
     public RefundService(
@@ -53,11 +58,15 @@ public class RefundService {
             RefundCaseRepository refundRepository,
             PayHereMerchantApiClient payHereClient,
             WalletService walletService,
+            OutboxService outboxService,
+            AuditService auditService,
             PlatformTransactionManager transactionManager) {
         this.orderRepository = orderRepository;
         this.refundRepository = refundRepository;
         this.payHereClient = payHereClient;
         this.walletService = walletService;
+        this.outboxService = outboxService;
+        this.auditService = auditService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -117,7 +126,14 @@ public class RefundService {
             throw e;
         }
 
-        return refundRepository.findByRefundCaseId(refundId).orElse(refund);
+        RefundCase completed = refundRepository.findByRefundCaseId(refundId).orElse(refund);
+        auditService.recordWithActor(actorUserId, "FINANCE_SUPPORT", "REFUND_" + completed.getStatus(),
+                "refund_case", refundId,
+                Map.of("orderId", orderId),
+                Map.of("status", completed.getStatus(),
+                        "coinsReversed", completed.getCoinsReversed(),
+                        "providerRefundId", String.valueOf(completed.getProviderRefundId())));
+        return completed;
     }
 
     private RefundCase getOrCreateCase(PaymentOrder order, String reason, String actorUserId) {
@@ -199,6 +215,19 @@ public class RefundService {
             order.setRefundedAt(Instant.now());
             refund.setCoinsReversed(coins);
             refund.setStatus(RefundCase.STATUS_COMPLETED);
+
+            // Same transaction as the reversal: the player is told only about a
+            // refund that actually removed the coins.
+            outboxService.enqueue(
+                    OutboxService.REFUND_COMPLETED,
+                    "refund_case",
+                    refundCaseId,
+                    Map.of(
+                            "userId", order.getUserId(),
+                            "orderId", order.getOrderId(),
+                            "coinsReversed", coins
+                    )
+            );
             log.info("Refund {} completed: reverse {} RC for user {}",
                     refundCaseId, coins, order.getUserId());
         } else {
