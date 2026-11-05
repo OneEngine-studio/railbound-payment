@@ -104,10 +104,8 @@ class PortalApplicationTests {
     @Test
     @DisplayName("Armory Purchase Gate: 1150 coins - 450 coin ACOG yields 700 balance and active entitlement")
     void testArmoryAcogPurchaseGate() {
-        // Credit 1150 coins to player first. The ledger reference must be unique
-        // per test run because the unique index survives across Maven runs.
-        walletService.creditRealCoins(
-                testUserId, 1150, "TEST_SEED", "ref_seed_" + testUserId, "Initial test credit");
+        // Credit 1150 coins to player first
+        walletService.creditRealCoins(testUserId, 1150, "TEST_SEED", "ref_seed_01", "Initial test credit");
         assertEquals(1150, walletService.getWalletByUserId(testUserId).getRealCoins());
 
         // Purchase att_scope_tactical_acog (450 coins)

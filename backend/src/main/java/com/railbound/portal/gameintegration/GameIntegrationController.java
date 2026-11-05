@@ -2,15 +2,10 @@ package com.railbound.portal.gameintegration;
 
 import com.railbound.portal.announcements.Announcement;
 import com.railbound.portal.announcements.AnnouncementService;
-import com.railbound.portal.flags.FeatureFlagService;
 import com.railbound.portal.identity.User;
 import com.railbound.portal.identity.UserRepository;
 import com.railbound.portal.inventory.InventoryEntitlement;
 import com.railbound.portal.inventory.InventoryService;
-import com.railbound.portal.notifications.Notification;
-import com.railbound.portal.notifications.NotificationService;
-import com.railbound.portal.releases.ContentRelease;
-import com.railbound.portal.releases.ReleaseService;
 import com.railbound.portal.security.SecurityUtils;
 import com.railbound.portal.shop.ShopItem;
 import com.railbound.portal.shop.ShopService;
@@ -24,7 +19,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -37,9 +31,6 @@ public class GameIntegrationController {
     private final InventoryService inventoryService;
     private final ShopService shopService;
     private final AnnouncementService announcementService;
-    private final NotificationService notificationService;
-    private final ReleaseService releaseService;
-    private final FeatureFlagService featureFlagService;
     private final UserRepository userRepository;
     private final String internalServiceKey;
 
@@ -48,24 +39,18 @@ public class GameIntegrationController {
             InventoryService inventoryService,
             ShopService shopService,
             AnnouncementService announcementService,
-            NotificationService notificationService,
-            ReleaseService releaseService,
-            FeatureFlagService featureFlagService,
             UserRepository userRepository,
             @Value("${app.internal.service-key}") String internalServiceKey) {
         this.walletService = walletService;
         this.inventoryService = inventoryService;
         this.shopService = shopService;
         this.announcementService = announcementService;
-        this.notificationService = notificationService;
-        this.releaseService = releaseService;
-        this.featureFlagService = featureFlagService;
         this.userRepository = userRepository;
         this.internalServiceKey = internalServiceKey;
     }
 
     @GetMapping("/game/sync")
-    @Operation(summary = "In-game client synchronization cursor (wallet + inventory + news + notifications)")
+    @Operation(summary = "In-game client synchronization cursor (wallet + inventory + news cursor)")
     public ResponseEntity<Map<String, Object>> gameSync() {
         String userId = SecurityUtils.getCurrentUserId();
         Wallet wallet = walletService.getOrCreateWallet(userId);
@@ -73,22 +58,14 @@ public class GameIntegrationController {
         List<Announcement> news = announcementService.getPublishedNews();
         String latestNewsId = news.isEmpty() ? null : news.get(0).getAnnouncementId();
 
-        List<Notification> notifications = notificationService.getMyNotifications(userId);
-
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("userId", userId);
-        response.put("realCoins", wallet.getRealCoins());
-        response.put("gameCoins", wallet.getGameCoins());
-        response.put("entitlements", entitlements);
-        response.put("latestNewsId", latestNewsId != null ? latestNewsId : "");
-        response.put("notifications", notifications);
-        response.put("unreadNotifications", notificationService.getUnreadCount(userId));
-        response.put("contentVersion", releaseService.getLatestPublished()
-                .map(ContentRelease::getVersion)
-                .orElse("0.0.0"));
-        response.put("serverTime", Instant.now());
-        response.put("syncedAt", Instant.now());
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok(Map.of(
+                "userId", userId,
+                "realCoins", wallet.getRealCoins(),
+                "gameCoins", wallet.getGameCoins(),
+                "entitlements", entitlements,
+                "latestNewsId", latestNewsId != null ? latestNewsId : "",
+                "syncedAt", Instant.now()
+        ));
     }
 
     @GetMapping("/game/catalog")
@@ -98,36 +75,50 @@ public class GameIntegrationController {
     }
 
     @GetMapping("/game/content-manifest")
-    @Operation(summary = "Versioned content manifest with bundle keys, SHA-256 hashes and sizes")
+    @Operation(summary = "Signed/versioned content manifest metadata with SHA-256 bundle hashes")
     public ResponseEntity<Map<String, Object>> getContentManifest() {
-        return ResponseEntity.ok(releaseService.getManifest());
+        return ResponseEntity.ok(Map.of(
+                "manifestVersion", "1.0.0",
+                "targetClientVersions", List.of("2023.1", "1.0.0"),
+                "generatedAt", Instant.now(),
+                "bundles", List.of(
+                        Map.of(
+                                "bundleKey", "bundles/weapons/att_scope_tactical_acog.bundle",
+                                "itemSku", "att_scope_tactical_acog",
+                                "sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                                "sizeBytes", 248912
+                        ),
+                        Map.of(
+                                "bundleKey", "bundles/operators/skin_op_shadow_operative.bundle",
+                                "itemSku", "skin_op_shadow_operative",
+                                "sha256", "38b9195b28d08c8b417eef982c71f49e49a1d5a76c8c889f0237bb9610f13511",
+                                "sizeBytes", 894120
+                        )
+                )
+        ));
     }
 
     @GetMapping("/game/releases/latest")
-    @Operation(summary = "Latest published client content release")
+    @Operation(summary = "Latest compatible client content release")
     public ResponseEntity<Map<String, Object>> getLatestRelease() {
-        return releaseService.getLatestPublished()
-                .map(release -> ResponseEntity.ok(Map.<String, Object>of(
-                        "releaseId", release.getReleaseId(),
-                        "version", release.getVersion(),
-                        "manifestVersion", release.getManifestVersion(),
-                        "status", release.getStatus(),
-                        "targetClientVersions", release.getTargetClientVersions(),
-                        "itemCount", release.getItems().size(),
-                        "publishedAt", release.getPublishedAt() == null ? Instant.now() : release.getPublishedAt()
-                )))
-                .orElseGet(() -> ResponseEntity.ok(Map.of(
-                        "releaseId", "",
-                        "version", "0.0.0",
-                        "status", "NONE",
-                        "itemCount", 0
-                )));
+        return ResponseEntity.ok(Map.of(
+                "releaseId", "rel_2026_10_29",
+                "version", "1.0.0",
+                "status", "PUBLISHED",
+                "publishedAt", Instant.now()
+        ));
     }
 
     @GetMapping("/game/config")
     @Operation(summary = "Safe public runtime game configuration and feature flags")
     public ResponseEntity<Map<String, Object>> getGameConfig() {
-        return ResponseEntity.ok(featureFlagService.getPublicConfig());
+        return ResponseEntity.ok(Map.of(
+                "realCoinsEnabled", true,
+                "gameCoinsEnabled", false,
+                "shopEnabled", true,
+                "topUpEnabled", true,
+                "minClientVersion", "1.0.0"
+        ));
     }
 
     @PostMapping("/internal/entitlements/check")

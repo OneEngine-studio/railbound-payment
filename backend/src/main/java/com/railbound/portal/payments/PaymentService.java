@@ -1,31 +1,28 @@
 package com.railbound.portal.payments;
 
+import com.railbound.portal.audit.AuditService;
 import com.railbound.portal.bundles.CoinBundle;
 import com.railbound.portal.bundles.CoinBundleService;
 import com.railbound.portal.common.DuplicateResourceException;
-import com.railbound.portal.common.InvalidSignatureException;
 import com.railbound.portal.common.InvalidStateException;
-import com.railbound.portal.common.PaymentConfigurationException;
 import com.railbound.portal.common.ResourceNotFoundException;
-import com.railbound.portal.identity.User;
-import com.railbound.portal.identity.UserRepository;
-import com.railbound.portal.outbox.OutboxService;
+import com.railbound.portal.refunds.RefundService;
 import com.railbound.portal.wallet.WalletService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.Base64;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -34,166 +31,347 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Authoritative top-up orchestration.
+ * Order lifecycle and payment fulfillment.
  *
- * <p>Security invariants:</p>
- * <ol>
- *   <li>The client may only send {@code bundleSku}, {@code provider} and an
- *       idempotency key. Prices and coin amounts always come from the bundle
- *       snapshot in MongoDB.</li>
- *   <li>A redirect never credits coins. Only a cryptographically verified
- *       provider callback (or an authenticated PayHere Merchant API lookup) can
- *       fulfil an order.</li>
- *   <li>Fulfilment is a single MongoDB transaction: order -> COMPLETED, one
- *       wallet credit, one immutable ledger entry, one deduplicated event.</li>
- *   <li>Callbacks are deduplicated by provider event id and by the ledger's
- *       unique reference key, so retries can never double-credit.</li>
- * </ol>
+ * <p>INVARIANTS enforced here:
+ * <ul>
+ *   <li>Coins are credited only from a signature-verified provider notification (or an admin
+ *       review decision), never from a browser redirect.</li>
+ *   <li>Price, currency and coin amount come from the order snapshot, never from the client.</li>
+ *   <li>A notification is honoured only if its amount AND currency equal the order's; otherwise the
+ *       order is parked as REVIEW_REQUIRED and nothing is credited.</li>
+ *   <li>One order is credited at most once: event de-duplication, the order state machine and the
+ *       unique ledger reference all independently prevent a double credit.</li>
+ * </ul>
  */
 @Service
 public class PaymentService {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
+    public static final String LEDGER_REF_TYPE = "PAYMENT_ORDER";
+    private static final Duration ORDER_TTL = Duration.ofMinutes(30);
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final PaymentOrderRepository orderRepository;
     private final PaymentEventRepository eventRepository;
     private final CoinBundleService bundleService;
     private final WalletService walletService;
-    private final UserRepository userRepository;
-    private final PayHereMerchantApiClient payHereMerchantApiClient;
-    private final OutboxService outboxService;
-    private final Map<String, PaymentGatewayAdapter> adapters;
-    private final TransactionTemplate transactionTemplate;
+    private final RefundService refundService;
+    private final AuditService auditService;
+    private final MockPaymentAdapter mockPaymentAdapter;
+    private final PayHereAdapter payHereAdapter;
     private final String defaultProvider;
-    private final String publicBaseUrl;
-    private final String frontendBaseUrl;
 
-    public PaymentService(
-            PaymentOrderRepository orderRepository,
-            PaymentEventRepository eventRepository,
-            CoinBundleService bundleService,
-            WalletService walletService,
-            UserRepository userRepository,
-            PayHereMerchantApiClient payHereMerchantApiClient,
-            OutboxService outboxService,
-            List<PaymentGatewayAdapter> adapterList,
-            PlatformTransactionManager transactionManager,
-            @Value("${app.payment.default-provider:payhere}") String defaultProvider,
-            @Value("${app.payment.public-base-url:http://localhost:8080}") String publicBaseUrl,
-            @Value("${app.payment.frontend-base-url:http://localhost:3000}") String frontendBaseUrl) {
+    public PaymentService(PaymentOrderRepository orderRepository,
+                          PaymentEventRepository eventRepository,
+                          CoinBundleService bundleService,
+                          WalletService walletService,
+                          RefundService refundService,
+                          AuditService auditService,
+                          MockPaymentAdapter mockPaymentAdapter,
+                          PayHereAdapter payHereAdapter,
+                          @Value("${app.payment.default-provider:mock}") String defaultProvider) {
         this.orderRepository = orderRepository;
         this.eventRepository = eventRepository;
         this.bundleService = bundleService;
         this.walletService = walletService;
-        this.userRepository = userRepository;
-        this.payHereMerchantApiClient = payHereMerchantApiClient;
-        this.outboxService = outboxService;
-        this.adapters = new LinkedHashMap<>();
-        for (PaymentGatewayAdapter adapter : adapterList) {
-            adapters.put(adapter.getProviderName().toLowerCase(Locale.ROOT), adapter);
-        }
-        this.transactionTemplate = new TransactionTemplate(transactionManager);
-        this.defaultProvider = defaultProvider == null ? "payhere" : defaultProvider.trim().toLowerCase(Locale.ROOT);
-        this.publicBaseUrl = stripTrailingSlash(publicBaseUrl);
-        this.frontendBaseUrl = stripTrailingSlash(frontendBaseUrl);
-
-        if (this.publicBaseUrl.contains("localhost") || this.publicBaseUrl.contains("127.0.0.1")) {
-            log.warn("app.payment.public-base-url is '{}'. PayHere cannot reach localhost; set a public HTTPS " +
-                    "tunnel/domain for PAYMENT_PUBLIC_BASE_URL before taking real payments.", this.publicBaseUrl);
-        }
+        this.refundService = refundService;
+        this.auditService = auditService;
+        this.mockPaymentAdapter = mockPaymentAdapter;
+        this.payHereAdapter = payHereAdapter;
+        this.defaultProvider = defaultProvider;
     }
 
-    public PaymentGatewayAdapter getAdapter(String providerName) {
-        String key = providerName == null || providerName.isBlank()
-                ? defaultProvider
-                : providerName.trim().toLowerCase(Locale.ROOT);
-        PaymentGatewayAdapter adapter = adapters.get(key);
-        if (adapter == null) {
-            throw new ResourceNotFoundException("Unsupported payment provider: " + providerName);
+    // ------------------------------------------------------------------ providers
+
+    /** Providers that are currently usable, real provider first. */
+    public List<Map<String, Object>> listProviders() {
+        List<Map<String, Object>> providers = new ArrayList<>();
+        if (payHereAdapter.isEnabled()) {
+            Map<String, Object> p = new LinkedHashMap<>();
+            p.put("id", PayHereAdapter.PROVIDER);
+            p.put("label", "PayHere (cards, wallets, bank)");
+            p.put("sandbox", payHereAdapter.isSandbox());
+            providers.add(p);
         }
-        if (!adapter.isConfigured()) {
-            throw new PaymentConfigurationException(
-                    "Payment provider '" + key + "' is not configured for this deployment.");
+        if (mockPaymentAdapter.isEnabled()) {
+            Map<String, Object> p = new LinkedHashMap<>();
+            p.put("id", MockPaymentAdapter.PROVIDER);
+            p.put("label", "Mock checkout (development only)");
+            p.put("sandbox", true);
+            providers.add(p);
+        }
+        return providers;
+    }
+
+    private PaymentGatewayAdapter getAdapter(String providerName) {
+        String name = providerName == null ? "" : providerName.trim().toLowerCase(Locale.ROOT);
+        PaymentGatewayAdapter adapter = null;
+        if (MockPaymentAdapter.PROVIDER.equals(name)) {
+            adapter = mockPaymentAdapter;
+        } else if (PayHereAdapter.PROVIDER.equals(name)) {
+            adapter = payHereAdapter;
+        }
+        if (adapter == null || !adapter.isEnabled()) {
+            throw new ResourceNotFoundException("Unsupported or disabled payment provider: " + providerName);
         }
         return adapter;
     }
 
-    // ---------------------------------------------------------------------
-    // Checkout creation
-    // ---------------------------------------------------------------------
+    // ------------------------------------------------------------------ checkout
 
+    /** Backwards compatible entry point: creates the order and returns it. */
+    @Transactional
     public PaymentOrder createCheckoutSession(String userId, String bundleSku, String provider, String idempotencyKey) {
-        if (userId == null || userId.isBlank()) {
-            throw new AccessDeniedException("Authenticated player is required");
-        }
+        return startCheckout(userId, bundleSku, provider, idempotencyKey).order();
+    }
 
-        // Retry-safe: replaying the same idempotency key returns the original
-        // order (and the original hosted checkout URL), never a second charge.
+    /**
+     * Creates (or, for a repeated Idempotency-Key, re-opens) an order for a bundle and returns where
+     * the player should go to pay. Price and coins are snapshotted from the trusted bundle config.
+     */
+    @Transactional
+    public CheckoutStart startCheckout(String userId, String bundleSku, String provider, String idempotencyKey) {
+        String selected = (provider != null && !provider.isBlank()) ? provider : defaultProvider;
+        PaymentGatewayAdapter adapter = getAdapter(selected);
+
+        PaymentOrder order = null;
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-            Optional<PaymentOrder> existing = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey);
-            if (existing.isPresent()) {
-                log.info("Idempotent checkout request detected for user {} and key {}", userId, idempotencyKey);
-                return existing.get();
+            order = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey).orElse(null);
+        }
+
+        if (order != null) {
+            if (!adapter.getProviderName().equals(order.getProvider())
+                    || (bundleSku != null && !bundleSku.equals(order.getBundleSku()))) {
+                throw new DuplicateResourceException("Idempotency-Key was already used for a different checkout request");
             }
+            log.info("Idempotent checkout replay for user {} order {}", userId, order.getOrderId());
+        } else {
+            if (bundleSku == null || bundleSku.isBlank()) {
+                throw new InvalidStateException("bundleSku is required");
+            }
+            CoinBundle bundle = bundleService.getBundleBySku(bundleSku);
+            if (!bundle.isActive()) {
+                throw new InvalidStateException("This coin bundle is not available");
+            }
+            String orderId = "ord_" + UUID.randomUUID().toString().replace("-", "");
+            order = new PaymentOrder(
+                    orderId, userId, bundle.getSku(), bundle.getTotalCoins(),
+                    bundle.getFiatAmountMinor(), bundle.getCurrency(),
+                    adapter.getProviderName(), idempotencyKey,
+                    Instant.now().plus(ORDER_TTL));
+            log.info("Created order {} for user {} bundle {} via {}", orderId, userId, bundle.getSku(), adapter.getProviderName());
         }
 
-        CoinBundle bundle = bundleService.getBundleBySku(bundleSku);
-        if (!bundle.isActive()) {
-            throw new InvalidStateException("Bundle is not available for purchase: " + bundleSku);
+        boolean payable = (order.getStatus() == PaymentOrderStatus.PENDING || order.getStatus() == PaymentOrderStatus.CREATED)
+                && order.getExpiresAt() != null && order.getExpiresAt().isAfter(Instant.now());
+        if (!payable) {
+            return new CheckoutStart(orderRepository.save(order), null);
         }
 
-        String selectedProvider = (provider != null && !provider.isBlank()) ? provider : defaultProvider;
-        PaymentGatewayAdapter adapter = getAdapter(selectedProvider);
-
-        String orderId = "ord_" + UUID.randomUUID().toString();
-        Instant expiresAt = Instant.now().plus(30, ChronoUnit.MINUTES);
-        String checkoutToken = generateCheckoutToken();
-
-        PaymentOrder order = new PaymentOrder(
-                orderId,
-                userId,
-                bundle.getSku(),
-                bundle.getTotalCoins(),
-                bundle.getFiatAmountMinor(),
-                bundle.getCurrency(),
-                adapter.getProviderName(),
-                idempotencyKey,
-                expiresAt
-        );
-        order.setCheckoutToken(checkoutToken);
-
-        User user = userRepository.findByUserId(userId).orElse(null);
-        PaymentGatewayAdapter.CheckoutContext context = buildCheckoutContext(order, user);
-
-        // The adapter is called before persistence so a missing PayHere
-        // credential produces a clean 503 instead of a dangling PENDING order.
-        PaymentGatewayAdapter.CheckoutSessionResult result = adapter.createCheckoutSession(order, context);
-        if (result.providerSessionId() != null && !result.providerSessionId().isBlank()) {
-            order.setProviderSessionId(result.providerSessionId());
-        }
-
-        String checkoutUrl = result.requiresFormPost()
-                ? hostedBridgeUrl(orderId, checkoutToken)
-                : result.checkoutUrl();
-        order.setCheckoutUrl(checkoutUrl);
-
-        PaymentOrder saved = orderRepository.save(order);
-        log.info("Created {} top-up order {} for user {}: {} RC for {} (minor units)",
-                saved.getProvider(), saved.getOrderId(), userId, saved.getCoinsToCredit(), saved.getAmountMinor());
-        return saved;
+        // A fresh one-time token on every call; only its hash is stored.
+        String token = newCheckoutToken();
+        order.setCheckoutTokenHash(sha256Hex(token));
+        PaymentGatewayAdapter.CheckoutSessionResult session = adapter.createCheckoutSession(order, token);
+        order.setProviderSessionId(session.providerSessionId());
+        order = orderRepository.save(order);
+        return new CheckoutStart(order, session.checkoutUrl());
     }
 
-    public String checkoutUrlFor(PaymentOrder order) {
-        return order.getCheckoutUrl();
+    /**
+     * Returns the signed form fields for PayHere's hosted page. Authorized by the one-time checkout
+     * token that was issued to the order owner, so it can be called from a browser tab or from the
+     * Unity client's external browser without a session.
+     */
+    @Transactional
+    public HostedForm buildHostedForm(String orderId, String checkoutToken, BillingDetails billing) {
+        PaymentOrder order = orderRepository.findByOrderId(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found: " + orderId));
+
+        if (checkoutToken == null || order.getCheckoutTokenHash() == null
+                || !MessageDigest.isEqual(
+                        sha256Hex(checkoutToken).getBytes(StandardCharsets.UTF_8),
+                        order.getCheckoutTokenHash().getBytes(StandardCharsets.UTF_8))) {
+            throw new AccessDeniedException("Invalid or expired checkout link");
+        }
+        if (!PayHereAdapter.PROVIDER.equals(order.getProvider())) {
+            throw new InvalidStateException("This order does not use the PayHere checkout");
+        }
+        if (order.getStatus() != PaymentOrderStatus.PENDING && order.getStatus() != PaymentOrderStatus.CREATED) {
+            throw new InvalidStateException("This order is not awaiting payment (status: " + order.getStatus() + ")");
+        }
+        if (order.getExpiresAt() != null && order.getExpiresAt().isBefore(Instant.now())) {
+            throw new InvalidStateException("This checkout session has expired. Please start a new top-up.");
+        }
+        if (billing == null) {
+            throw new InvalidStateException("Billing details are required");
+        }
+
+        HostedForm form = payHereAdapter.buildHostedForm(order, billing.validated());
+        if (order.getStatus() == PaymentOrderStatus.CREATED) {
+            transition(order, PaymentOrderStatus.PENDING);
+            orderRepository.save(order);
+        }
+        return form;
     }
+
+    // ------------------------------------------------------------------ webhooks
+
+    /**
+     * Entry point for provider notifications. Returns true when the notification was accepted
+     * (including harmless duplicates); throws InvalidSignatureException for forgeries.
+     */
+    @Transactional
+    public boolean processWebhook(String providerName, String rawBody, String signatureHeader) {
+        PaymentGatewayAdapter adapter = getAdapter(providerName);
+        WebhookEvent event = adapter.verifyAndParseWebhook(rawBody, signatureHeader);
+        return applyEvent(adapter.getProviderName(), event);
+    }
+
+    private boolean applyEvent(String provider, WebhookEvent event) {
+        if (eventRepository.existsByProviderAndProviderEventId(provider, event.eventId())) {
+            log.info("Duplicate {} event {} ignored", provider, event.eventId());
+            return true;
+        }
+
+        Optional<PaymentOrder> maybeOrder = orderRepository.findByOrderId(event.orderId());
+        if (maybeOrder.isEmpty()) {
+            log.warn("Verified {} event {} references unknown order {}", provider, event.eventId(), event.orderId());
+            eventRepository.save(new PaymentEvent(provider, event.eventId(), event.orderId(),
+                    "ORDER_NOT_FOUND", event.sanitizedPayload()));
+            return true;
+        }
+
+        PaymentOrder order = maybeOrder.get();
+        if (!provider.equalsIgnoreCase(order.getProvider())) {
+            log.error("Event from {} for order {} that belongs to provider {}", provider, order.getOrderId(), order.getProvider());
+            throw new InvalidStateException("Notification provider does not match the order's provider");
+        }
+
+        String result;
+        switch (event.outcome()) {
+            case SUCCEEDED -> result = applySuccess(provider, order, event);
+            case PENDING -> result = applyPending(order);
+            case CANCELLED -> result = applyUnpaidEnd(order, PaymentOrderStatus.CANCELLED, event);
+            case FAILED -> result = applyUnpaidEnd(order, PaymentOrderStatus.FAILED, event);
+            case CHARGED_BACK -> result = applyChargeback(order);
+            default -> throw new InvalidStateException("Unsupported payment event outcome");
+        }
+
+        eventRepository.save(new PaymentEvent(provider, event.eventId(), order.getOrderId(), result, event.sanitizedPayload()));
+        return true;
+    }
+
+    private String applySuccess(String provider, PaymentOrder order, WebhookEvent event) {
+        PaymentOrderStatus previous = order.getStatus();
+        if (previous.isFulfilled()) {
+            log.info("Success event for already fulfilled order {} ignored", order.getOrderId());
+            return "DUPLICATE_IGNORED";
+        }
+
+        boolean amountOk = event.amountMinor() != null && event.amountMinor() == order.getAmountMinor();
+        boolean currencyOk = event.currency() != null && event.currency().equalsIgnoreCase(order.getCurrency());
+        if (!amountOk || !currencyOk) {
+            log.error("Payment mismatch on order {}: expected {} {} minor, provider reported {} {}",
+                    order.getOrderId(), order.getAmountMinor(), order.getCurrency(), event.amountMinor(), event.currency());
+            if (previous != PaymentOrderStatus.REVIEW_REQUIRED) {
+                transition(order, PaymentOrderStatus.REVIEW_REQUIRED);
+            }
+            order.setProviderPaymentId(event.providerPaymentId());
+            order.setStatusMessage("Amount/currency mismatch: expected " + order.getAmountMinor() + " "
+                    + order.getCurrency() + " (minor units), provider reported " + event.amountMinor() + " " + event.currency());
+            orderRepository.save(order);
+            auditService.record("SYSTEM:" + provider, "PAYMENT_MISMATCH", order.getOrderId(), "REVIEW_REQUIRED",
+                    order.getStatusMessage());
+            return "AMOUNT_MISMATCH";
+        }
+
+        creditOrder(order, event.providerPaymentId());
+        auditService.record("SYSTEM:" + provider, "PAYMENT_COMPLETED", order.getOrderId(), "SUCCESS",
+                "coins=" + order.getCoinsToCredit() + " paymentId=" + event.providerPaymentId());
+
+        boolean late = previous == PaymentOrderStatus.EXPIRED || previous == PaymentOrderStatus.CANCELLED
+                || previous == PaymentOrderStatus.FAILED;
+        return late ? "PROCESSED_LATE" : "PROCESSED";
+    }
+
+    private String applyPending(PaymentOrder order) {
+        if (order.getStatus() == PaymentOrderStatus.CREATED || order.getStatus() == PaymentOrderStatus.PENDING) {
+            transition(order, PaymentOrderStatus.PROCESSING);
+            orderRepository.save(order);
+            return "PROCESSED";
+        }
+        return "IGNORED_OUT_OF_ORDER";
+    }
+
+    private String applyUnpaidEnd(PaymentOrder order, PaymentOrderStatus target, WebhookEvent event) {
+        PaymentOrderStatus s = order.getStatus();
+        if (s == PaymentOrderStatus.CREATED || s == PaymentOrderStatus.PENDING || s == PaymentOrderStatus.PROCESSING) {
+            transition(order, target);
+            order.setStatusMessage(event.statusMessage());
+            orderRepository.save(order);
+            return "PROCESSED";
+        }
+        return "IGNORED_OUT_OF_ORDER";
+    }
+
+    private String applyChargeback(PaymentOrder order) {
+        if (order.getStatus() == PaymentOrderStatus.COMPLETED) {
+            transition(order, PaymentOrderStatus.CHARGED_BACK);
+            orderRepository.save(order);
+            refundService.openChargebackCase(order);
+            return "PROCESSED";
+        }
+        if (order.getStatus().isFulfilled()) {
+            return "IGNORED_OUT_OF_ORDER";
+        }
+        // A chargeback for something we never fulfilled is unexpected: a human must look at it.
+        if (order.getStatus() != PaymentOrderStatus.REVIEW_REQUIRED) {
+            transition(order, PaymentOrderStatus.REVIEW_REQUIRED);
+        }
+        order.setStatusMessage("Chargeback reported for an order that was never fulfilled");
+        orderRepository.save(order);
+        auditService.record("SYSTEM", "CHARGEBACK_UNFULFILLED", order.getOrderId(), "REVIEW_REQUIRED", order.getStatusMessage());
+        return "REVIEW";
+    }
+
+    /** Marks the order COMPLETED and credits the wallet exactly once. */
+    private void creditOrder(PaymentOrder order, String providerPaymentId) {
+        transition(order, PaymentOrderStatus.COMPLETED);
+        order.setCompletedAt(Instant.now());
+        order.setStatusMessage(null);
+        if (providerPaymentId != null) {
+            order.setProviderPaymentId(providerPaymentId);
+        }
+        orderRepository.save(order);
+
+        if (walletService.hasLedgerReference(LEDGER_REF_TYPE, order.getOrderId())) {
+            log.error("Order {} had no COMPLETED status but a ledger credit already exists; not crediting again",
+                    order.getOrderId());
+            return;
+        }
+        walletService.creditRealCoins(order.getUserId(), order.getCoinsToCredit(), LEDGER_REF_TYPE,
+                order.getOrderId(), "Top-up via " + order.getProvider() + " (" + order.getBundleSku() + ")");
+    }
+
+    private void transition(PaymentOrder order, PaymentOrderStatus next) {
+        if (order.getStatus() == next) {
+            return;
+        }
+        if (!order.getStatus().canTransitionTo(next)) {
+            throw new InvalidStateException("Illegal payment order transition " + order.getStatus() + " -> " + next);
+        }
+        order.setStatus(next);
+    }
+
+    // ------------------------------------------------------------------ queries
 
     public PaymentOrder getOrderForUser(String orderId, String userId) {
         PaymentOrder order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found: " + orderId));
-
         if (!order.getUserId().equals(userId)) {
-            throw new AccessDeniedException("Access denied: Order does not belong to authenticated player");
+            throw new AccessDeniedException("You do not have access to this order");
         }
         return order;
     }
@@ -206,461 +384,132 @@ public class PaymentService {
         return orderRepository.findAllByOrderByCreatedAtDesc();
     }
 
-    // ---------------------------------------------------------------------
-    // Hosted checkout bridge (PayHere requires an HTML form POST)
-    // ---------------------------------------------------------------------
+    public List<PaymentOrder> getOrdersAwaitingReview() {
+        return orderRepository.findByStatusOrderByCreatedAtDesc(PaymentOrderStatus.REVIEW_REQUIRED);
+    }
 
-    public HostedCheckout prepareHostedCheckout(String orderId, String checkoutToken) {
-        PaymentOrder order = orderRepository.findByOrderId(orderId)
-                .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
+    // ------------------------------------------------------------------ housekeeping / admin
 
-        // Constant-time compare avoids turning the token into a timing oracle.
-        if (checkoutToken == null || order.getCheckoutToken() == null
-                || !PayHereAdapter.constantTimeEquals(order.getCheckoutToken(), checkoutToken)) {
-            throw new ResourceNotFoundException("Order not found");
-        }
-
-        if (order.getStatus() == PaymentOrderStatus.COMPLETED) {
-            throw new InvalidStateException("Order has already been completed");
-        }
-        if (order.getStatus() != PaymentOrderStatus.CREATED
-                && order.getStatus() != PaymentOrderStatus.PENDING
-                && order.getStatus() != PaymentOrderStatus.PROCESSING) {
-            throw new InvalidStateException("Order is no longer payable: " + order.getStatus());
-        }
-        if (order.getExpiresAt() != null && order.getExpiresAt().isBefore(Instant.now())) {
-            order.setStatus(PaymentOrderStatus.EXPIRED);
+    /** Expires unpaid orders whose local checkout window has passed. Called by the scheduler. */
+    @Transactional
+    public int expireStaleOrders() {
+        List<PaymentOrder> stale = orderRepository.findByStatusInAndExpiresAtBefore(
+                List.of(PaymentOrderStatus.CREATED, PaymentOrderStatus.PENDING), Instant.now());
+        for (PaymentOrder order : stale) {
+            transition(order, PaymentOrderStatus.EXPIRED);
+            order.setStatusMessage("Checkout session expired before a verified payment notification arrived");
             orderRepository.save(order);
-            throw new InvalidStateException("Checkout session has expired");
         }
-
-        PaymentGatewayAdapter adapter = getAdapter(order.getProvider());
-        User user = userRepository.findByUserId(order.getUserId()).orElse(null);
-        PaymentGatewayAdapter.CheckoutSessionResult result =
-                adapter.createCheckoutSession(order, buildCheckoutContext(order, user));
-
-        if (result.requiresFormPost()) {
-            return new HostedCheckout(order, result.checkoutUrl(), result.formFields(), true);
+        if (!stale.isEmpty()) {
+            log.info("Expired {} stale unpaid order(s)", stale.size());
         }
-        return new HostedCheckout(order, result.checkoutUrl(), Map.of(), false);
+        return stale.size();
     }
 
-    // ---------------------------------------------------------------------
-    // Provider callbacks
-    // ---------------------------------------------------------------------
-
-    /**
-     * Backwards-compatible overload used by the mock adapter and unit tests.
-     */
-    public boolean processWebhook(String providerName, String rawBody, String signatureHeader) {
-        Map<String, String> headers = signatureHeader == null
-                ? Map.of()
-                : Map.of("X-Signature", signatureHeader);
-        return processWebhook(providerName, rawBody, headers, Map.of());
-    }
-
-    /**
-     * Verifies and applies a provider callback. Returns {@code true} for both a
-     * fresh fulfillment and a correctly identified duplicate (so providers stop
-     * retrying), and throws for forged/invalid callbacks so they can be alerted on.
-     */
-    public boolean processWebhook(String providerName, String rawBody,
-                                  Map<String, String> headers, Map<String, String> formParams) {
-        PaymentGatewayAdapter adapter = getAdapter(providerName);
-        PaymentNotification notification = adapter.verifyAndParseNotification(
-                new PaymentGatewayAdapter.WebhookRequest(rawBody, headers, formParams));
-
-        if (notification == null || notification.orderId() == null || notification.orderId().isBlank()) {
-            throw new InvalidStateException("Callback did not contain an order reference");
-        }
-
-        String provider = adapter.getProviderName();
-        if (eventRepository.existsByProviderAndProviderEventId(provider, notification.providerEventId())) {
-            log.info("Duplicate {} callback {} acknowledged without side effects",
-                    provider, notification.providerEventId());
-            return true;
-        }
-
-        return switch (notification.outcome()) {
-            case PAID -> handlePaid(provider, notification);
-            case PENDING -> handleNonPaid(provider, notification, PaymentOrderStatus.PROCESSING, "PENDING");
-            case CANCELLED -> handleNonPaid(provider, notification, PaymentOrderStatus.CANCELLED, "CANCELLED");
-            case FAILED -> handleNonPaid(provider, notification, PaymentOrderStatus.FAILED, "FAILED");
-            case CHARGEDBACK, REFUNDED -> handleRefundSignal(provider, notification);
-        };
-    }
-
-    private boolean handlePaid(String provider, PaymentNotification notification) {
-        try {
-            Boolean result = transactionTemplate.execute(status -> {
-                PaymentOrder order = orderRepository.findByOrderId(notification.orderId())
-                        .orElseThrow(() -> new ResourceNotFoundException(
-                                "Order not found for webhook: " + notification.orderId()));
-
-                if (!provider.equalsIgnoreCase(order.getProvider())) {
-                    throw new InvalidStateException("Callback provider does not match the order provider");
-                }
-
-                if (order.getStatus() == PaymentOrderStatus.COMPLETED) {
-                    recordDuplicateEvent(provider, notification, order.getOrderId());
-                    return true;
-                }
-                if (order.getStatus() == PaymentOrderStatus.REFUNDED
-                        || order.getStatus() == PaymentOrderStatus.REFUND_PENDING) {
-                    throw new InvalidStateException("Order is in a refund lifecycle and cannot be credited");
-                }
-                if (order.getStatus() == PaymentOrderStatus.CANCELLED
-                        || order.getStatus() == PaymentOrderStatus.EXPIRED) {
-                    throw new InvalidStateException(
-                            "Order " + order.getOrderId() + " was already closed as " + order.getStatus());
-                }
-
-                validateAmountAndCurrency(order, notification);
-
-                // The order snapshot is the only source of truth for the credit.
-                order.setStatus(PaymentOrderStatus.COMPLETED);
-                order.setCompletedAt(Instant.now());
-                order.setProviderStatusCode(notification.statusCode());
-                if (notification.providerPaymentId() != null) {
-                    order.setProviderPaymentId(notification.providerPaymentId());
-                }
-                orderRepository.save(order);
-
-                String description = "Real Coin Top-up: " + order.getCoinsToCredit()
-                        + " coins (" + order.getBundleSku() + ", " + provider + ")";
-                walletService.creditRealCoins(
-                        order.getUserId(),
-                        order.getCoinsToCredit(),
-                        "PAYMENT_ORDER",
-                        order.getOrderId(),
-                        description
-                );
-
-                eventRepository.save(new PaymentEvent(
-                        provider,
-                        notification.providerEventId(),
-                        order.getOrderId(),
-                        "PROCESSED",
-                        notification.sanitizedPayload()
-                ));
-
-                // Outbox row shares the transaction with the credit: the player is
-                // notified only for a credit that actually committed.
-                outboxService.enqueue(
-                        OutboxService.WALLET_CREDITED,
-                        "payment_order",
-                        order.getOrderId(),
-                        Map.of(
-                                "userId", order.getUserId(),
-                                "coins", order.getCoinsToCredit(),
-                                "orderId", order.getOrderId(),
-                                "provider", provider
-                        )
-                );
-
-                log.info("Fulfilled {} top-up order {}: +{} RC to user {} (paymentId={})",
-                        provider, order.getOrderId(), order.getCoinsToCredit(),
-                        order.getUserId(), notification.providerPaymentId());
-                return true;
-            });
-            return Boolean.TRUE.equals(result);
-        } catch (DuplicateKeyException | DuplicateResourceException e) {
-            // A concurrent retry won the race. The unique ledger reference and
-            // payment_events index guarantee exactly one credit.
-            log.info("Concurrent duplicate callback for order {} ignored: {}",
-                    notification.orderId(), e.getClass().getSimpleName());
-            return true;
-        }
-    }
-
-    private boolean handleNonPaid(String provider, PaymentNotification notification,
-                                  PaymentOrderStatus target, String eventStatus) {
-        try {
-            Boolean result = transactionTemplate.execute(status -> {
-                PaymentOrder order = orderRepository.findByOrderId(notification.orderId())
-                        .orElseThrow(() -> new ResourceNotFoundException(
-                                "Order not found for webhook: " + notification.orderId()));
-
-                // Never regress a terminal order because a delayed/out-of-order
-                // "failed"/"pending" callback arrived after it was closed.
-                if (order.getStatus() == PaymentOrderStatus.COMPLETED
-                        || order.getStatus() == PaymentOrderStatus.REFUNDED
-                        || order.getStatus() == PaymentOrderStatus.REFUND_PENDING
-                        || order.getStatus() == PaymentOrderStatus.CANCELLED
-                        || order.getStatus() == PaymentOrderStatus.EXPIRED) {
-                    log.info("Ignoring {} callback for order {} in terminal status {}",
-                            eventStatus, order.getOrderId(), order.getStatus());
-                    recordDuplicateEvent(provider, notification, order.getOrderId());
-                    return true;
-                }
-
-                if (order.getStatus() != target) {
-                    order.setStatus(target);
-                    if (notification.providerPaymentId() != null) {
-                        order.setProviderPaymentId(notification.providerPaymentId());
-                    }
-                    order.setProviderStatusCode(notification.statusCode());
-                    orderRepository.save(order);
-                }
-
-                eventRepository.save(new PaymentEvent(
-                        provider,
-                        notification.providerEventId(),
-                        order.getOrderId(),
-                        eventStatus,
-                        notification.sanitizedPayload()
-                ));
-                log.info("Order {} transitioned to {} via {} callback",
-                        order.getOrderId(), target, provider);
-                return true;
-            });
-            return Boolean.TRUE.equals(result);
-        } catch (DuplicateKeyException e) {
-            return true;
-        }
-    }
-
-    private boolean handleRefundSignal(String provider, PaymentNotification notification) {
-        try {
-            Boolean result = transactionTemplate.execute(status -> {
-                PaymentOrder order = orderRepository.findByOrderId(notification.orderId())
-                        .orElseThrow(() -> new ResourceNotFoundException(
-                                "Order not found for webhook: " + notification.orderId()));
-
-                // Never reverse the wallet automatically here: the player may
-                // already have spent the coins. Support must review the case.
-                if (order.getStatus() == PaymentOrderStatus.COMPLETED) {
-                    order.setStatus(PaymentOrderStatus.REFUND_PENDING);
-                    order.setProviderStatusCode(notification.statusCode());
-                    if (notification.providerPaymentId() != null) {
-                        order.setProviderPaymentId(notification.providerPaymentId());
-                    }
-                    orderRepository.save(order);
-                }
-
-                eventRepository.save(new PaymentEvent(
-                        provider,
-                        notification.providerEventId(),
-                        order.getOrderId(),
-                        "REFUND_SIGNAL",
-                        notification.sanitizedPayload()
-                ));
-                log.warn("Refund/chargeback signal for order {} ({}). Marked REFUND_PENDING for review.",
-                        order.getOrderId(), notification.statusCode());
-                return true;
-            });
-            return Boolean.TRUE.equals(result);
-        } catch (DuplicateKeyException e) {
-            return true;
-        }
-    }
-
-    private void recordDuplicateEvent(String provider, PaymentNotification notification, String orderId) {
-        if (eventRepository.existsByProviderAndProviderEventId(provider, notification.providerEventId())) {
-            return;
-        }
-        eventRepository.save(new PaymentEvent(
-                provider,
-                notification.providerEventId(),
-                orderId,
-                "DUPLICATE_IGNORED",
-                notification.sanitizedPayload()
-        ));
-    }
-
-    private void validateAmountAndCurrency(PaymentOrder order, PaymentNotification notification) {
-        if (notification.amountMinor() == null) {
-            throw new InvalidStateException("Paid callback did not include an amount");
-        }
-        if (notification.amountMinor() != order.getAmountMinor()) {
-            log.error("Amount mismatch for order {}: expected {} minor units, provider sent {}",
-                    order.getOrderId(), order.getAmountMinor(), notification.amountMinor());
-            throw new InvalidStateException("Callback amount does not match the order snapshot");
-        }
-        if (notification.currency() == null
-                || !notification.currency().equalsIgnoreCase(order.getCurrency())) {
-            log.error("Currency mismatch for order {}: expected {}, provider sent {}",
-                    order.getOrderId(), order.getCurrency(), notification.currency());
-            throw new InvalidStateException("Callback currency does not match the order snapshot");
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // Reconciliation / manual completion
-    // ---------------------------------------------------------------------
-
-    /**
-     * Finance/admin reconciliation. Uses the authenticated PayHere Retrieval API
-     * (not a client-supplied status) to recover paid-but-unfulfilled orders.
-     */
-    public ReconciliationResult reconcileOrder(String orderId) {
+    /** Consistency check for one order: status vs. ledger. Also expires it if it is stale. */
+    @Transactional
+    public Map<String, Object> reconcileOrder(String orderId, String actorUserId) {
         PaymentOrder order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found: " + orderId));
 
-        if (!"payhere".equalsIgnoreCase(order.getProvider())) {
-            throw new InvalidStateException("Reconciliation is only supported for payhere orders");
+        boolean expiredNow = false;
+        if ((order.getStatus() == PaymentOrderStatus.CREATED || order.getStatus() == PaymentOrderStatus.PENDING)
+                && order.getExpiresAt() != null && order.getExpiresAt().isBefore(Instant.now())) {
+            transition(order, PaymentOrderStatus.EXPIRED);
+            order.setStatusMessage("Checkout session expired before a verified payment notification arrived");
+            orderRepository.save(order);
+            expiredNow = true;
         }
 
-        PaymentOrderStatus before = order.getStatus();
-        Optional<PayHereMerchantApiClient.PayHerePaymentRecord> record =
-                payHereMerchantApiClient.retrievePayment(orderId);
+        boolean credited = walletService.hasLedgerReference(LEDGER_REF_TYPE, orderId);
+        boolean consistent = order.getStatus().isFulfilled() == credited;
 
-        if (record.isEmpty()) {
-            return new ReconciliationResult(order, "NO_PAYMENT_FOUND", before);
-        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("orderId", orderId);
+        result.put("status", order.getStatus().name());
+        result.put("ledgerCreditPresent", credited);
+        result.put("consistent", consistent);
+        result.put("expiredNow", expiredNow);
+        result.put("note", consistent
+                ? "Order status and ledger agree."
+                : "INCONSISTENT: investigate before changing anything. Confirm the payment in the PayHere dashboard.");
 
-        PayHereMerchantApiClient.PayHerePaymentRecord payment = record.get();
-        String status = payment.status() == null ? "" : payment.status().toUpperCase(Locale.ROOT);
-
-        switch (status) {
-            case "RECEIVED" -> {
-                PaymentNotification notification = new PaymentNotification(
-                        "reconcile:" + (payment.paymentId() == null ? orderId : payment.paymentId()),
-                        orderId,
-                        payment.paymentId(),
-                        PaymentNotification.Outcome.PAID,
-                        toMinor(payment.amount()),
-                        payment.currency(),
-                        "2",
-                        "{\"source\":\"payhere-retrieval\",\"status\":\"RECEIVED\"}"
-                );
-                handlePaid("payhere", notification);
-                PaymentOrder refreshed = orderRepository.findByOrderId(orderId).orElse(order);
-                return new ReconciliationResult(refreshed, "RECEIVED", before);
-            }
-            case "REFUNDED", "CHARGEBACKED", "REFUND REQUESTED", "REFUND PROCESSING" -> {
-                // "REFUND REQUESTED"/"REFUND PROCESSING" mean the money is still
-                // moving, so they share the non-terminal REFUND_PENDING review
-                // path instead of being treated as a completed reversal.
-                boolean completedReversal = "REFUNDED".equals(status) || "CHARGEBACKED".equals(status);
-                PaymentNotification notification = new PaymentNotification(
-                        "reconcile:" + (payment.paymentId() == null ? orderId : payment.paymentId()) + ":" + status,
-                        orderId,
-                        payment.paymentId(),
-                        completedReversal
-                                ? ("REFUNDED".equals(status)
-                                    ? PaymentNotification.Outcome.REFUNDED
-                                    : PaymentNotification.Outcome.CHARGEDBACK)
-                                : PaymentNotification.Outcome.REFUNDED,
-                        toMinor(payment.amount()),
-                        payment.currency(),
-                        status,
-                        "{\"source\":\"payhere-retrieval\",\"status\":\"" + status + "\"}"
-                );
-                handleRefundSignal("payhere", notification);
-                PaymentOrder refreshed = orderRepository.findByOrderId(orderId).orElse(order);
-                return new ReconciliationResult(refreshed, status, before);
-            }
-            default -> {
-                return new ReconciliationResult(order, status.isBlank() ? "UNKNOWN" : status, before);
-            }
-        }
+        auditService.record(actorUserId, "ORDER_RECONCILED", orderId, consistent ? "CONSISTENT" : "INCONSISTENT",
+                "status=" + order.getStatus() + " ledgerCredit=" + credited);
+        return result;
     }
 
     /**
-     * Development-only path used by the mock hosted page. Disabled unless the
-     * mock provider feature flag is on.
+     * Resolves a REVIEW_REQUIRED order after a human verified the payment in the PayHere dashboard:
+     * approve credits the coins once, reject marks the order FAILED.
      */
-    public boolean mockCompleteOrder(String orderId) {
+    @Transactional
+    public PaymentOrder resolveReview(String orderId, boolean approve, String note, String actorUserId) {
         PaymentOrder order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found: " + orderId));
-
-        if (!"mock".equalsIgnoreCase(order.getProvider())) {
-            throw new InvalidStateException("Order is not a mock-provider order");
+        if (order.getStatus() != PaymentOrderStatus.REVIEW_REQUIRED) {
+            throw new InvalidStateException("Order is not awaiting review (status: " + order.getStatus() + ")");
         }
-        // Fail closed if the mock flag was turned off after the order was created.
-        getAdapter("mock");
+        if (note == null || note.isBlank()) {
+            throw new InvalidStateException("A review note is required");
+        }
 
-        String eventId = "evt_mock_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        String payloadJson = String.format(
-                "{\"type\":\"payment.succeeded\",\"eventId\":\"%s\",\"orderId\":\"%s\",\"amountMinor\":%d,\"currency\":\"%s\",\"paymentId\":\"mockpay_%s\"}",
-                eventId, order.getOrderId(), order.getAmountMinor(), order.getCurrency(), eventId
-        );
+        if (approve) {
+            creditOrder(order, order.getProviderPaymentId());
+        } else {
+            transition(order, PaymentOrderStatus.FAILED);
+            order.setStatusMessage("Rejected after review: " + note.trim());
+            orderRepository.save(order);
+        }
+        auditService.record(actorUserId, approve ? "REVIEW_APPROVED" : "REVIEW_REJECTED", orderId,
+                approve ? "COMPLETED" : "FAILED", note.trim());
+        return order;
+    }
+
+    // ------------------------------------------------------------------ mock provider (dev only)
+
+    /**
+     * Simulates the provider completing a hosted checkout. Development only: disabled unless
+     * {@code app.payment.mock.enabled=true}, and only the order's owner may trigger it. It goes
+     * through the same signed-webhook path as a real provider.
+     */
+    @Transactional
+    public boolean mockCompleteOrder(String orderId, String userId) {
+        if (!mockPaymentAdapter.isEnabled()) {
+            throw new ResourceNotFoundException("Mock payment provider is disabled");
+        }
+        PaymentOrder order = getOrderForUser(orderId, userId);
+        if (!MockPaymentAdapter.PROVIDER.equals(order.getProvider())) {
+            throw new InvalidStateException("This order was not created with the mock provider");
+        }
+
+        String eventId = "evt_mock_" + UUID.randomUUID().toString().replace("-", "");
+        String payload = String.format(
+                "{\"type\":\"payment.succeeded\",\"eventId\":\"%s\",\"orderId\":\"%s\",\"amountMinor\":%d,\"currency\":\"%s\"}",
+                eventId, order.getOrderId(), order.getAmountMinor(), order.getCurrency());
 
         try {
-            com.railbound.portal.payments.MockPaymentAdapter mock =
-                    (com.railbound.portal.payments.MockPaymentAdapter) getAdapter("mock");
-            String signature = mock.computeHmacSha256(payloadJson, mock.getSecret());
-            return processWebhook("mock", payloadJson, signature);
-        } catch (InvalidSignatureException e) {
-            throw e;
-        } catch (Exception e) {
+            String signature = mockPaymentAdapter.computeHmacSha256(payload, mockPaymentAdapter.getSecret());
+            return processWebhook(MockPaymentAdapter.PROVIDER, payload, signature);
+        } catch (java.security.GeneralSecurityException e) {
             throw new IllegalStateException("Mock webhook signing failed", e);
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------
+    // ------------------------------------------------------------------ helpers
 
-    private PaymentGatewayAdapter.CheckoutContext buildCheckoutContext(PaymentOrder order, User user) {
-        String displayName = user != null && user.getDisplayName() != null
-                ? user.getDisplayName().trim()
-                : "Railbound Player";
-        String[] parts = displayName.split("\\s+", 2);
-        String firstName = parts.length > 0 && !parts[0].isBlank() ? parts[0] : "Railbound";
-        String lastName = parts.length > 1 && !parts[1].isBlank() ? parts[1] : "Player";
-
-        String email = user != null && user.getEmail() != null && !user.getEmail().isBlank()
-                ? user.getEmail().trim()
-                : "player@railbound.invalid";
-
-        return new PaymentGatewayAdapter.CheckoutContext(
-                frontendBaseUrl + "/checkout/return?orderId=" + order.getOrderId(),
-                frontendBaseUrl + "/checkout/return?orderId=" + order.getOrderId() + "&cancelled=1",
-                publicBaseUrl + "/api/v1/payments/webhooks/" + order.getProvider(),
-                firstName,
-                lastName,
-                email,
-                // The portal does not yet collect a phone number. PayHere only
-                // needs a syntactically valid value to pre-fill the hosted page.
-                "0770000000",
-                "No.1 Railbound Sector",
-                "Colombo",
-                "Sri Lanka"
-        );
-    }
-
-    /**
-     * The bridge page must be served from the <em>frontend</em> origin because
-     * PayHere validates the browser's Referer against the merchant's registered
-     * domain. Serving the auto-submit form from the API origin would cause
-     * "Unauthorized Payment Request" errors in production.
-     */
-    private String hostedBridgeUrl(String orderId, String checkoutToken) {
-        return frontendBaseUrl + "/checkout/hosted?orderId=" + orderId + "&token=" + checkoutToken;
-    }
-
-    private String generateCheckoutToken() {
+    private static String newCheckoutToken() {
         byte[] bytes = new byte[32];
-        SECURE_RANDOM.nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        RANDOM.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
     }
 
-    private static long toMinor(BigDecimal amount) {
-        if (amount == null) {
-            throw new InvalidStateException("Provider payment record did not include an amount");
+    private static String sha256Hex(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
         }
-        return amount.setScale(2, RoundingMode.UNNECESSARY).movePointRight(2).longValueExact();
     }
-
-    private static String stripTrailingSlash(String value) {
-        if (value == null) {
-            return "";
-        }
-        return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
-    }
-
-    public record HostedCheckout(
-            PaymentOrder order,
-            String actionUrl,
-            Map<String, String> formFields,
-            boolean requiresFormPost
-    ) {}
-
-    public record ReconciliationResult(
-            PaymentOrder order,
-            String providerStatus,
-            PaymentOrderStatus previousStatus
-    ) {}
 }

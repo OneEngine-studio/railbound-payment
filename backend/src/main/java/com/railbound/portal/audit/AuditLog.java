@@ -5,15 +5,11 @@ import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
-import java.util.Map;
 
 /**
- * Append-only administrative audit record.
- *
- * <p>Only sanitized summaries are stored: never payment secrets, card data or
- * raw provider payloads. {@code before} / {@code after} are small maps of the
- * fields that changed so a reviewer can reconstruct an administrative decision
- * without reading application logs.</p>
+ * Append-only record of a sensitive action (payment fulfillment, refunds, catalog publication...).
+ * Rows are only ever inserted by {@link AuditService}; no API exposes update or delete.
+ * Never put secrets, card data or full personal data in {@code details}.
  */
 @Document(collection = "audit_logs")
 public class AuditLog {
@@ -21,121 +17,59 @@ public class AuditLog {
     @Id
     private String id;
 
-    @Indexed
-    private String actorId;
-
-    private String actorRole;
-
-    @Indexed
+    private String auditId;
+    private String actor;
     private String action;
-
-    private String targetType;
-    private String targetId;
-
-    private Map<String, Object> before;
-    private Map<String, Object> after;
-
-    /** Request correlation id so an audit row can be tied back to an API call. */
-    private String correlationId;
+    private String target;
+    private String status;
+    private String details;
 
     @Indexed
-    private Instant createdAt;
+    private Instant timestamp;
 
     public AuditLog() {
-        this.createdAt = Instant.now();
+        this.timestamp = Instant.now();
     }
 
-    public AuditLog(String actorId, String actorRole, String action, String targetType,
-                    String targetId, Map<String, Object> before, Map<String, Object> after,
-                    String correlationId) {
-        this();
-        this.actorId = actorId;
-        this.actorRole = actorRole;
+    public AuditLog(String auditId, String actor, String action, String target, String status, String details) {
+        this.auditId = auditId;
+        this.actor = actor;
         this.action = action;
-        this.targetType = targetType;
-        this.targetId = targetId;
-        this.before = before;
-        this.after = after;
-        this.correlationId = correlationId;
+        this.target = target;
+        this.status = status;
+        this.details = details;
+        this.timestamp = Instant.now();
     }
 
     public String getId() {
         return id;
     }
 
-    public void setId(String id) {
-        this.id = id;
+    public String getAuditId() {
+        return auditId;
     }
 
-    public String getActorId() {
-        return actorId;
-    }
-
-    public void setActorId(String actorId) {
-        this.actorId = actorId;
-    }
-
-    public String getActorRole() {
-        return actorRole;
-    }
-
-    public void setActorRole(String actorRole) {
-        this.actorRole = actorRole;
+    public String getActor() {
+        return actor;
     }
 
     public String getAction() {
         return action;
     }
 
-    public void setAction(String action) {
-        this.action = action;
+    public String getTarget() {
+        return target;
     }
 
-    public String getTargetType() {
-        return targetType;
+    public String getStatus() {
+        return status;
     }
 
-    public void setTargetType(String targetType) {
-        this.targetType = targetType;
+    public String getDetails() {
+        return details;
     }
 
-    public String getTargetId() {
-        return targetId;
-    }
-
-    public void setTargetId(String targetId) {
-        this.targetId = targetId;
-    }
-
-    public Map<String, Object> getBefore() {
-        return before;
-    }
-
-    public void setBefore(Map<String, Object> before) {
-        this.before = before;
-    }
-
-    public Map<String, Object> getAfter() {
-        return after;
-    }
-
-    public void setAfter(Map<String, Object> after) {
-        this.after = after;
-    }
-
-    public String getCorrelationId() {
-        return correlationId;
-    }
-
-    public void setCorrelationId(String correlationId) {
-        this.correlationId = correlationId;
-    }
-
-    public Instant getCreatedAt() {
-        return createdAt;
-    }
-
-    public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
+    public Instant getTimestamp() {
+        return timestamp;
     }
 }

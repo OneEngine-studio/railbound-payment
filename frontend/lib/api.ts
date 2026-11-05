@@ -61,9 +61,6 @@ export async function apiRequest<T = any>(
 }
 
 // API methods
-export const PAYMENT_PROVIDER = process.env.NEXT_PUBLIC_PAYMENT_PROVIDER || "payhere";
-export const MOCK_PAYMENTS_ENABLED = process.env.NEXT_PUBLIC_ENABLE_MOCK_PAYMENTS === "true";
-
 export const api = {
   // Auth
   getMe: () => apiRequest("/auth/me"),
@@ -81,8 +78,20 @@ export const api = {
   // Bundles
   getBundles: () => apiRequest("/coin-bundles"),
 
+  nakamaLogin: (token: string) =>
+    apiRequest("/auth/nakama-login", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+
   // Payments
-  createCheckoutSession: (bundleSku: string, provider = PAYMENT_PROVIDER, idempotencyKey?: string) =>
+  getPaymentProviders: () => apiRequest("/payments/providers"),
+  getHostedForm: (orderId: string, checkoutToken: string, billing: Record<string, string>) =>
+    apiRequest(`/payments/orders/${encodeURIComponent(orderId)}/hosted-form`, {
+      method: "POST",
+      body: JSON.stringify({ checkoutToken, billing }),
+    }),
+  createCheckoutSession: (bundleSku: string, provider = "mock", idempotencyKey?: string) =>
     apiRequest("/payments/checkout-sessions", {
       method: "POST",
       body: JSON.stringify({ bundleSku, provider }),
@@ -90,8 +99,6 @@ export const api = {
     }),
   getOrder: (orderId: string) => apiRequest(`/payments/orders/${orderId}`),
   getMyOrders: () => apiRequest("/payments/orders"),
-  getHostedCheckout: (orderId: string, token: string) =>
-    apiRequest(`/payments/hosted/${orderId}?token=${encodeURIComponent(token)}`),
   mockCompleteOrder: (orderId: string) =>
     apiRequest(`/payments/mock-complete/${orderId}`, { method: "POST" }),
 
@@ -131,16 +138,26 @@ export const api = {
   // Admin
   adminGetSummary: () => apiRequest("/admin/analytics/summary"),
   adminGetOrders: () => apiRequest("/admin/orders"),
-  adminReconcileOrder: (orderId: string) =>
-    apiRequest(`/admin/payments/${orderId}/reconcile`, { method: "POST" }),
-  adminGetRefunds: () => apiRequest("/admin/refunds"),
-  adminRequestRefund: (orderId: string, reason: string) =>
-    apiRequest("/admin/refunds", {
-      method: "POST",
-      body: JSON.stringify({ orderId, reason }),
-    }),
   adminGetPlayers: () => apiRequest("/admin/players"),
   adminGetAuditLogs: () => apiRequest("/admin/audit-logs"),
+  adminGetRefunds: () => apiRequest("/admin/refunds"),
+  adminCreateRefund: (orderId: string, reason: string) =>
+    apiRequest("/admin/refunds", { method: "POST", body: JSON.stringify({ orderId, reason }) }),
+  adminRetryRefund: (refundId: string) =>
+    apiRequest(`/admin/refunds/${refundId}/retry`, { method: "POST" }),
+  adminConfirmRefund: (refundId: string, providerRefundId?: string) =>
+    apiRequest(`/admin/refunds/${refundId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ providerRefundId: providerRefundId || "" }),
+    }),
+  adminGetOrdersInReview: () => apiRequest("/admin/payments/review"),
+  adminReconcileOrder: (orderId: string) =>
+    apiRequest(`/admin/payments/${orderId}/reconcile`, { method: "POST" }),
+  adminResolveReview: (orderId: string, approve: boolean, note: string) =>
+    apiRequest(`/admin/payments/${orderId}/review`, {
+      method: "POST",
+      body: JSON.stringify({ approve, note }),
+    }),
   adminGetItems: () => apiRequest("/admin/items"),
   adminCreateItem: (item: any) =>
     apiRequest("/admin/items", { method: "POST", body: JSON.stringify(item) }),

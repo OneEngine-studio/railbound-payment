@@ -3,22 +3,17 @@ package com.railbound.portal.payments;
 import com.railbound.portal.security.SecurityUtils;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.io.IOException;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/payments")
-@Tag(name = "Payments", description = "PayHere hosted top-up checkout, callbacks and order status")
+@Tag(name = "Payments", description = "Hosted top-up checkout and webhook fulfillment")
 public class PaymentController {
 
     private final PaymentService paymentService;
@@ -27,8 +22,17 @@ public class PaymentController {
         this.paymentService = paymentService;
     }
 
+    /** Request body for opening the PayHere hosted page. */
+    public record HostedFormRequest(String checkoutToken, BillingDetails billing) {}
+
+    @GetMapping("/providers")
+    @Operation(summary = "List payment providers that are currently enabled")
+    public ResponseEntity<List<Map<String, Object>>> providers() {
+        return ResponseEntity.ok(paymentService.listProviders());
+    }
+
     @PostMapping("/checkout-sessions")
-    @Operation(summary = "Create a hosted PayHere checkout session for a coin bundle")
+    @Operation(summary = "Create hosted checkout session for a coin bundle")
     public ResponseEntity<Map<String, Object>> createCheckoutSession(
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody Map<String, String> request) {
@@ -36,19 +40,26 @@ public class PaymentController {
         String bundleSku = request.get("bundleSku");
         String provider = request.get("provider");
 
-        PaymentOrder order = paymentService.createCheckoutSession(userId, bundleSku, provider, idempotencyKey);
+        CheckoutStart start = paymentService.startCheckout(userId, bundleSku, provider, idempotencyKey);
+        PaymentOrder order = start.order();
 
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("orderId", order.getOrderId());
-        response.put("status", order.getStatus().name());
-        response.put("checkoutUrl", paymentService.checkoutUrlFor(order));
-        response.put("provider", order.getProvider());
-        response.put("bundleSku", order.getBundleSku());
-        response.put("coinsToCredit", order.getCoinsToCredit());
-        response.put("amountMinor", order.getAmountMinor());
-        response.put("currency", order.getCurrency());
-        response.put("expiresAt", order.getExpiresAt());
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("orderId", order.getOrderId());
+        body.put("status", order.getStatus().name());
+        body.put("provider", order.getProvider());
+        body.put("checkoutUrl", start.checkoutUrl());
+        body.put("bundleSku", order.getBundleSku());
+        body.put("coinsToCredit", order.getCoinsToCredit());
+        body.put("amountMinor", order.getAmountMinor());
+        body.put("currency", order.getCurrency());
+        body.put("expiresAt", order.getExpiresAt());
+        return ResponseEntity.status(HttpStatus.CREATED).body(body);
+    }
+
+    @PostMapping("/orders/{orderId}/hosted-form")
+    @Operation(summary = "Get the signed PayHere form fields for an order (authorized by the one-time checkout token)")
+    public ResponseEntity<HostedForm> hostedForm(@PathVariable String orderId, @RequestBody HostedFormRequest request) {
+        return ResponseEntity.ok(paymentService.buildHostedForm(orderId, request.checkoutToken(), request.billing()));
     }
 
     @GetMapping("/orders/{orderId}")
@@ -67,58 +78,26 @@ public class PaymentController {
     }
 
     /**
-     * PayHere posts {@code application/x-www-form-urlencoded}, not JSON. We read
-     * the servlet request directly so the same endpoint can also accept the
-     * development mock's JSON payload.
-     *
-     * <p>Signature verification happens inside the provider adapter before any
-     * state change; an unsigned/failed callback results in HTTP 401.</p>
+     * Provider server-to-server callback. Public by necessity (the provider has no login); trust
+     * comes entirely from the provider's signature, verified over the raw body inside the adapter.
+     * PayHere posts application/x-www-form-urlencoded; the mock provider posts JSON with an
+     * X-Signature header. The body is read as a raw string so the signature is checked over exactly
+     * what was sent.
      */
     @PostMapping("/webhooks/{provider}")
-    @Operation(summary = "Inbound payment provider callback (PayHere form POST)")
+    @Operation(summary = "Inbound payment provider notification (signature verified)")
     public ResponseEntity<Map<String, String>> handleWebhook(
             @PathVariable String provider,
-            @RequestHeader Map<String, String> headers,
-            HttpServletRequest request) throws IOException {
-
-        String contentType = request.getContentType() == null
-                ? ""
-                : request.getContentType().toLowerCase();
-
-        Map<String, String> formParams = new LinkedHashMap<>();
-        String rawBody;
-
-        if (contentType.contains(MediaType.APPLICATION_FORM_URLENCODED_VALUE)) {
-            // PayHere sends form params. The container parses them; we then
-            // rebuild a deterministic body for audit logging only.
-            request.getParameterMap().forEach((key, values) ->
-                    formParams.put(key, values.length > 0 ? values[0] : ""));
-            rawBody = toFormEncoded(formParams);
-        } else {
-            rawBody = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        }
-
-        boolean success = paymentService.processWebhook(provider, rawBody, headers, formParams);
+            @RequestHeader(value = "X-Signature", required = false) String signature,
+            @RequestBody String rawBody) {
+        boolean success = paymentService.processWebhook(provider, rawBody, signature);
         return ResponseEntity.ok(Map.of("status", success ? "PROCESSED" : "IGNORED"));
     }
 
     @PostMapping("/mock-complete/{orderId}")
-    @Operation(summary = "Development-only simulated checkout completion (mock provider must be enabled)")
+    @Operation(summary = "DEV ONLY: simulate the mock hosted checkout completing (owner only, disabled in production)")
     public ResponseEntity<Map<String, Object>> mockComplete(@PathVariable String orderId) {
-        boolean result = paymentService.mockCompleteOrder(orderId);
+        boolean result = paymentService.mockCompleteOrder(orderId, SecurityUtils.getCurrentUserId());
         return ResponseEntity.ok(Map.of("success", result, "orderId", orderId));
-    }
-
-    private static String toFormEncoded(Map<String, String> params) {
-        StringBuilder sb = new StringBuilder();
-        params.forEach((key, value) -> {
-            if (!sb.isEmpty()) {
-                sb.append('&');
-            }
-            sb.append(URLEncoder.encode(key, StandardCharsets.UTF_8))
-                    .append('=')
-                    .append(URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8));
-        });
-        return sb.toString();
     }
 }

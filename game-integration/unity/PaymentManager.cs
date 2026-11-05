@@ -36,8 +36,11 @@ namespace Railbound.Economy
 
         /// <summary>
         /// Request a hosted checkout session for the chosen coin bundle.
+        /// <paramref name="provider"/> is optional (e.g. "payhere"); when null the server's
+        /// configured default provider is used. For PayHere the returned URL opens the web
+        /// portal's billing-details page, which then forwards the player to PayHere.
         /// </summary>
-        public async void StartTopUp(string bundleSku)
+        public async void StartTopUp(string bundleSku, string provider = null)
         {
             if (!RailboundApiClient.Instance.IsAuthenticated)
             {
@@ -46,16 +49,18 @@ namespace Railbound.Economy
             }
 
             string idempotencyKey = "unity_" + Guid.NewGuid().ToString("N");
-            string payload = $"{{\"bundleSku\":\"{bundleSku}\",\"provider\":\"payhere\"}}";
+            string payload = string.IsNullOrEmpty(provider)
+                ? $"{{\"bundleSku\":\"{bundleSku}\"}}"
+                : $"{{\"bundleSku\":\"{bundleSku}\",\"provider\":\"{provider}\"}}";
 
             Debug.Log($"[PaymentManager] Initiating checkout for {bundleSku}...");
             var response = await RailboundApiClient.Instance.PostAsync<CheckoutSessionDto>(
                 "/payments/checkout-sessions", payload, idempotencyKey);
 
-            if (!response.IsSuccess || response.Data == null)
+            if (!response.IsSuccess || response.Data == null || string.IsNullOrEmpty(response.Data.checkoutUrl))
             {
                 Debug.LogError($"[PaymentManager] Checkout session failed: {response.ErrorMessage}");
-                OnPaymentFailed?.Invoke(null, response.ErrorMessage);
+                OnPaymentFailed?.Invoke(null, response.ErrorMessage ?? "Checkout is not available for this order");
                 return;
             }
 
@@ -91,7 +96,7 @@ namespace Railbound.Economy
 
         private IEnumerator PollOrderStatusRoutine(string orderId, CancellationToken ct)
         {
-            int maxAttempts = 40; // 40 * 1.5s = 60s max
+            int maxAttempts = 200; // 200 * 1.5s = 5 minutes max (card payments on the provider page take a while)
             for (int i = 0; i < maxAttempts; i++)
             {
                 if (ct.IsCancellationRequested) yield break;

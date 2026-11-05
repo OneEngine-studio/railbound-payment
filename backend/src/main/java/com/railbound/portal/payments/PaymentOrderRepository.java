@@ -4,6 +4,7 @@ import org.springframework.data.mongodb.repository.MongoRepository;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -14,7 +15,6 @@ public interface PaymentOrderRepository extends MongoRepository<PaymentOrder, St
     Optional<PaymentOrder> findByUserIdAndIdempotencyKey(String userId, String idempotencyKey);
     List<PaymentOrder> findByUserIdOrderByCreatedAtDesc(String userId);
     List<PaymentOrder> findAllByOrderByCreatedAtDesc();
-
-    List<PaymentOrder> findTop50ByStatusAndCreatedAtBeforeOrderByCreatedAtAsc(
-            PaymentOrderStatus status, Instant cutoff);
+    List<PaymentOrder> findByStatusInAndExpiresAtBefore(Collection<PaymentOrderStatus> statuses, Instant before);
+    List<PaymentOrder> findByStatusOrderByCreatedAtDesc(PaymentOrderStatus status);
 }

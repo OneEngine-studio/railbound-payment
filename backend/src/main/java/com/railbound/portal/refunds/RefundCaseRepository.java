@@ -8,7 +8,7 @@ import java.util.Optional;
 
 @Repository
 public interface RefundCaseRepository extends MongoRepository<RefundCase, String> {
-    Optional<RefundCase> findByRefundCaseId(String refundCaseId);
+    Optional<RefundCase> findByRefundId(String refundId);
     Optional<RefundCase> findByOrderId(String orderId);
     List<RefundCase> findAllByOrderByCreatedAtDesc();
 }

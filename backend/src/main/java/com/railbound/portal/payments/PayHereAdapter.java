@@ -1,325 +1,247 @@
 package com.railbound.portal.payments;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.railbound.portal.common.InvalidSignatureException;
 import com.railbound.portal.common.InvalidStateException;
-import com.railbound.portal.common.PaymentConfigurationException;
+import com.railbound.portal.common.ResourceNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
 
 /**
- * PayHere (Sri Lanka) Checkout API adapter.
+ * PayHere (payhere.lk) Checkout API adapter.
  *
- * <p>PayHere does not use HMAC. Its integrity model is two MD5 digests:</p>
+ * <p>Flow: our backend builds the signed form fields (including the server-generated {@code hash});
+ * the browser POSTs them to PayHere's hosted page; PayHere later calls our {@code notify_url} with a
+ * form-encoded notification signed with {@code md5sig}. Only that verified notification can credit
+ * coins - the browser redirect to {@code return_url} carries no payment status and grants nothing.
  *
- * <pre>
- * checkout hash = UPPER(MD5(merchant_id + order_id + amount + currency + UPPER(MD5(merchant_secret))))
- * notify  md5sig = UPPER(MD5(merchant_id + order_id + payhere_amount + payhere_currency + status_code + UPPER(MD5(merchant_secret))))
- * </pre>
- *
- * <p>Important operational rules:</p>
+ * <p>SECURITY
  * <ul>
- *   <li>The merchant secret never leaves the backend. The per-order hash is
- *       intentionally included in the auto-submitted form because that is how
- *       PayHere authenticates the checkout request.</li>
- *   <li>Amounts are formatted with exactly two decimals. Using the order's
- *       immutable minor-unit snapshot prevents client-side price tampering.</li>
- *   <li>Callbacks must be verified against the <em>exact</em> values PayHere
- *       posted, especially {@code payhere_amount}, because it is part of the
- *       digest.</li>
+ *   <li>The merchant secret never leaves the server and is never logged.</li>
+ *   <li>The checkout hash is computed from the trusted order snapshot, not from client input.</li>
+ *   <li>Notifications are rejected unless merchant_id matches and md5sig verifies (constant time).</li>
+ *   <li>Card holder name, masked card number and expiry from the notification are NOT persisted.</li>
  * </ul>
+ *
+ * <p>PayHere's notify_url must be publicly reachable (use a tunnel such as ngrok while developing).
  */
 @Component
 public class PayHereAdapter implements PaymentGatewayAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(PayHereAdapter.class);
 
-    /** PayHere supports these currencies for Checkout API. */
-    private static final java.util.Set<String> SUPPORTED_CURRENCIES = java.util.Set.of("LKR", "USD");
+    public static final String PROVIDER = "payhere";
+    private static final String SANDBOX_URL = "https://sandbox.payhere.lk/pay/checkout";
+    private static final String LIVE_URL = "https://www.payhere.lk/pay/checkout";
+    private static final int MAX_BODY_CHARS = 16_384;
 
+    private final boolean enabled;
+    private final boolean sandbox;
     private final String merchantId;
     private final String merchantSecret;
-    private final boolean sandbox;
-    private final String liveCheckoutUrl;
-    private final String sandboxCheckoutUrl;
-    private final String defaultCurrency;
+    private final String notifyUrl;
+    private final String frontendBaseUrl;
+    private final ObjectMapper objectMapper;
 
     public PayHereAdapter(
+            @Value("${app.payment.payhere.enabled:false}") boolean enabled,
+            @Value("${app.payment.payhere.sandbox:true}") boolean sandbox,
             @Value("${app.payment.payhere.merchant-id:}") String merchantId,
             @Value("${app.payment.payhere.merchant-secret:}") String merchantSecret,
-            @Value("${app.payment.payhere.sandbox:true}") boolean sandbox,
-            @Value("${app.payment.payhere.live-checkout-url:https://www.payhere.lk/pay/checkout}") String liveCheckoutUrl,
-            @Value("${app.payment.payhere.sandbox-checkout-url:https://sandbox.payhere.lk/pay/checkout}") String sandboxCheckoutUrl,
-            @Value("${app.payment.payhere.currency:USD}") String defaultCurrency) {
+            @Value("${app.payment.payhere.notify-url:}") String notifyUrl,
+            @Value("${app.payment.frontend-base-url:http://localhost:3000}") String frontendBaseUrl,
+            ObjectMapper objectMapper) {
+        this.enabled = enabled;
+        this.sandbox = sandbox;
         this.merchantId = merchantId == null ? "" : merchantId.trim();
         this.merchantSecret = merchantSecret == null ? "" : merchantSecret.trim();
-        this.sandbox = sandbox;
-        this.liveCheckoutUrl = liveCheckoutUrl;
-        this.sandboxCheckoutUrl = sandboxCheckoutUrl;
-        this.defaultCurrency = defaultCurrency == null ? "USD" : defaultCurrency.trim().toUpperCase(Locale.ROOT);
+        this.notifyUrl = notifyUrl == null ? "" : notifyUrl.trim();
+        this.frontendBaseUrl = stripTrailingSlash(frontendBaseUrl);
+        this.objectMapper = objectMapper;
+
+        if (enabled && !isConfigured()) {
+            log.warn("PayHere is enabled but merchant-id, merchant-secret or notify-url is missing; "
+                    + "the provider will stay disabled until all three are set.");
+        }
     }
 
     @Override
     public String getProviderName() {
-        return "payhere";
+        return PROVIDER;
     }
 
     @Override
-    public boolean isConfigured() {
-        return !merchantId.isBlank() && !merchantSecret.isBlank();
-    }
-
-    @Override
-    public CheckoutSessionResult createCheckoutSession(PaymentOrder order, CheckoutContext context) {
-        ensureConfigured();
-
-        String currency = resolveCurrency(order.getCurrency());
-        String amount = formatAmountMinor(order.getAmountMinor());
-        String orderId = order.getOrderId();
-
-        Map<String, String> fields = new LinkedHashMap<>();
-        fields.put("merchant_id", merchantId);
-        fields.put("return_url", context.returnUrl());
-        fields.put("cancel_url", context.cancelUrl());
-        fields.put("notify_url", context.notifyUrl());
-        fields.put("order_id", orderId);
-        fields.put("items", "Railbound Real Coins - " + order.getBundleSku()
-                + " (" + order.getCoinsToCredit() + " RC)");
-        fields.put("currency", currency);
-        fields.put("amount", amount);
-
-        // Customer details only pre-fill the hosted page. They are not proof of
-        // identity and are never used to decide which wallet to credit.
-        fields.put("first_name", safe(context.customerFirstName(), "Railbound"));
-        fields.put("last_name", safe(context.customerLastName(), "Player"));
-        fields.put("email", safe(context.customerEmail(), "player@railbound.invalid"));
-        fields.put("phone", safe(context.customerPhone(), "0770000000"));
-        fields.put("address", safe(context.customerAddress(), "No.1 Railbound Sector"));
-        fields.put("city", safe(context.customerCity(), "Colombo"));
-        fields.put("country", safe(context.customerCountry(), "Sri Lanka"));
-
-        // custom_1/custom_2 are echoed back by PayHere and let support staff trace
-        // a payment without trusting anything from the client.
-        fields.put("custom_1", order.getUserId());
-        fields.put("custom_2", order.getBundleSku());
-        fields.put("platform", "Railbound Portal");
-        fields.put("hash", computeCheckoutHash(orderId, amount, currency));
-
-        // PayHere has no server-side "session" call: the checkout is the form POST.
-        // A local reference is still stored to make order tracing easier.
-        String localReference = "payhere_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
-        log.info("Prepared PayHere checkout for order {} (sandbox={}, amount={} {})",
-                orderId, sandbox, amount, currency);
-
-        return new CheckoutSessionResult(localReference, checkoutActionUrl(), Map.copyOf(fields));
-    }
-
-    @Override
-    public PaymentNotification verifyAndParseNotification(WebhookRequest request) {
-        ensureConfigured();
-
-        Map<String, String> params = request.formParams() == null || request.formParams().isEmpty()
-                ? parseFormBody(request.rawBody())
-                : request.formParams();
-
-        String receivedMerchantId = required(params, "merchant_id");
-        String orderId = required(params, "order_id");
-        String amount = required(params, "payhere_amount");
-        String currency = required(params, "payhere_currency");
-        String statusCode = required(params, "status_code");
-        String md5sig = required(params, "md5sig");
-
-        // A merchant-id mismatch usually means the callback was sent to the wrong
-        // environment or forged; reject before touching any order.
-        if (!constantTimeEquals(merchantId, receivedMerchantId)) {
-            throw new InvalidSignatureException("PayHere callback merchant_id does not match this portal");
-        }
-
-        String expected = computeNotificationSignature(orderId, amount, currency, statusCode);
-        if (!constantTimeEquals(expected, md5sig)) {
-            log.warn("Rejected PayHere callback for order {}: md5sig mismatch", orderId);
-            throw new InvalidSignatureException("PayHere md5sig verification failed");
-        }
-
-        PaymentNotification.Outcome outcome = mapStatus(statusCode);
-        long amountMinor;
-        try {
-            amountMinor = parseAmountMinor(amount);
-        } catch (ArithmeticException | NumberFormatException e) {
-            throw new InvalidStateException("PayHere callback contains an invalid amount");
-        }
-
-        String paymentId = trimToNull(params.get("payment_id"));
-        String eventId = paymentId != null
-                ? paymentId + ":" + statusCode
-                : "nopid:" + md5Hex(orderId + "|" + statusCode + "|" + amount + "|" + currency);
-
-        String sanitized = String.format(Locale.ROOT,
-                "{\"orderId\":\"%s\",\"paymentId\":\"%s\",\"statusCode\":\"%s\",\"amount\":\"%s\",\"currency\":\"%s\",\"method\":\"%s\"}",
-                jsonEscape(orderId),
-                jsonEscape(paymentId == null ? "" : paymentId),
-                jsonEscape(statusCode),
-                jsonEscape(amount),
-                jsonEscape(currency),
-                jsonEscape(safe(params.get("method"), "")));
-
-        log.info("Verified PayHere callback for order {}: paymentId={}, statusCode={}, outcome={}",
-                orderId, paymentId, statusCode, outcome);
-
-        return new PaymentNotification(
-                eventId,
-                orderId,
-                paymentId,
-                outcome,
-                amountMinor,
-                currency.toUpperCase(Locale.ROOT),
-                statusCode,
-                sanitized
-        );
-    }
-
-    public String checkoutActionUrl() {
-        return sandbox ? sandboxCheckoutUrl : liveCheckoutUrl;
+    public boolean isEnabled() {
+        return enabled && isConfigured();
     }
 
     public boolean isSandbox() {
         return sandbox;
     }
 
-    /** Exposed for deterministic tests and operations tooling. */
-    public String computeCheckoutHash(String orderId, String amount, String currency) {
-        String secretHash = md5Hex(merchantSecret);
-        return md5Hex(merchantId + orderId + amount + currency + secretHash);
+    private boolean isConfigured() {
+        return !merchantId.isEmpty() && !merchantSecret.isEmpty() && !notifyUrl.isEmpty();
     }
 
-    /** Exposed for deterministic tests and operations tooling. */
-    public String computeNotificationSignature(String orderId, String payhereAmount,
-                                               String currency, String statusCode) {
-        String secretHash = md5Hex(merchantSecret);
-        return md5Hex(merchantId + orderId + payhereAmount + currency + statusCode + secretHash);
+    @Override
+    public CheckoutSessionResult createCheckoutSession(PaymentOrder order, String checkoutToken) {
+        // PayHere has no server-side "create session" call; the order id itself identifies the payment.
+        String sessionId = "ph_" + order.getOrderId();
+        String checkoutUrl = frontendBaseUrl + "/checkout/pay?orderId=" + urlEncode(order.getOrderId())
+                + "&ct=" + urlEncode(checkoutToken);
+        return new CheckoutSessionResult(sessionId, checkoutUrl);
     }
 
     /**
-     * Converts minor units to PayHere's required 2-decimal string without using
-     * floating point (currency must not drift).
+     * Builds the signed form the browser must POST to PayHere. Amount, currency and order id come
+     * from the persisted order snapshot; the customer cannot influence the price.
      */
-    public static String formatAmountMinor(long amountMinor) {
-        return BigDecimal.valueOf(amountMinor, 2)
-                .setScale(2, RoundingMode.UNNECESSARY)
-                .toPlainString();
-    }
-
-    public static long parseAmountMinor(String amount) {
-        return new BigDecimal(amount.trim())
-                .setScale(2, RoundingMode.UNNECESSARY)
-                .movePointRight(2)
-                .longValueExact();
-    }
-
-    private void ensureConfigured() {
-        if (!isConfigured()) {
-            throw new PaymentConfigurationException(
-                    "PayHere is not configured. Set PAYHERE_MERCHANT_ID and PAYHERE_MERCHANT_SECRET " +
-                    "(and PAYHERE_SANDBOX=true for sandbox) before creating checkouts.");
+    public HostedForm buildHostedForm(PaymentOrder order, BillingDetails billing) {
+        if (!isEnabled()) {
+            throw new ResourceNotFoundException("Payment provider is not enabled: " + PROVIDER);
         }
+
+        Map<String, String> fields = new LinkedHashMap<>();
+        fields.put("merchant_id", merchantId);
+        fields.put("return_url", frontendBaseUrl + "/checkout/return?orderId=" + urlEncode(order.getOrderId()));
+        fields.put("cancel_url", frontendBaseUrl + "/checkout/return?cancelled=1&orderId=" + urlEncode(order.getOrderId()));
+        fields.put("notify_url", notifyUrl);
+        fields.put("order_id", order.getOrderId());
+        fields.put("items", "Railbound Real Coins: " + order.getCoinsToCredit() + " RC");
+        fields.put("currency", order.getCurrency());
+        fields.put("amount", PayHereSignatures.formatAmount(order.getAmountMinor()));
+        fields.put("first_name", billing.firstName());
+        fields.put("last_name", billing.lastName());
+        fields.put("email", billing.email());
+        fields.put("phone", billing.phone());
+        fields.put("address", billing.address());
+        fields.put("city", billing.city());
+        fields.put("country", billing.country());
+        // custom_1 only carries a non-sensitive SKU for easier support lookups in the PayHere dashboard.
+        fields.put("custom_1", order.getBundleSku());
+        fields.put("hash", PayHereSignatures.checkoutHash(
+                merchantId, order.getOrderId(), order.getAmountMinor(), order.getCurrency(), merchantSecret));
+
+        return new HostedForm(sandbox ? SANDBOX_URL : LIVE_URL, fields);
     }
 
-    private String resolveCurrency(String orderCurrency) {
-        String currency = orderCurrency == null || orderCurrency.isBlank()
-                ? defaultCurrency
-                : orderCurrency.trim().toUpperCase(Locale.ROOT);
-        if (!SUPPORTED_CURRENCIES.contains(currency)) {
-            throw new PaymentConfigurationException(
-                    "PayHere supports only LKR or USD; order currency was " + currency);
+    @Override
+    public WebhookEvent verifyAndParseWebhook(String rawBody, String signatureHeader) {
+        if (!isEnabled()) {
+            throw new ResourceNotFoundException("Payment provider is not enabled: " + PROVIDER);
         }
-        return currency;
-    }
+        if (rawBody == null || rawBody.length() > MAX_BODY_CHARS) {
+            throw new InvalidSignatureException("Malformed payment notification");
+        }
 
-    private PaymentNotification.Outcome mapStatus(String statusCode) {
-        return switch (statusCode.trim()) {
-            case "2" -> PaymentNotification.Outcome.PAID;
-            case "0" -> PaymentNotification.Outcome.PENDING;
-            case "-1" -> PaymentNotification.Outcome.CANCELLED;
-            case "-2" -> PaymentNotification.Outcome.FAILED;
-            case "-3" -> PaymentNotification.Outcome.CHARGEDBACK;
+        Map<String, String> params = parseFormBody(rawBody);
+
+        String notifMerchantId = params.get("merchant_id");
+        String orderId = params.get("order_id");
+        String amount = params.get("payhere_amount");
+        String currency = params.get("payhere_currency");
+        String statusCode = params.get("status_code");
+        String md5sig = params.get("md5sig");
+
+        if (notifMerchantId == null || orderId == null || amount == null || currency == null
+                || statusCode == null || md5sig == null) {
+            throw new InvalidSignatureException("Malformed payment notification");
+        }
+        if (!merchantId.equals(notifMerchantId)) {
+            log.warn("PayHere notification rejected: merchant_id mismatch");
+            throw new InvalidSignatureException("Notification is for a different merchant");
+        }
+
+        // Signature covers merchant_id, order_id, amount, currency, status and the secret. Compare
+        // using the values exactly as received - re-formatting them could hide tampering.
+        String expected = PayHereSignatures.notifySignature(
+                notifMerchantId, orderId, amount, currency, statusCode, merchantSecret);
+        if (!PayHereSignatures.constantTimeEqualsIgnoreCase(expected, md5sig)) {
+            log.warn("PayHere notification rejected: md5sig verification failed for order {}", orderId);
+            throw new InvalidSignatureException("Webhook signature verification failed");
+        }
+
+        WebhookEvent.Outcome outcome;
+        switch (statusCode.trim()) {
+            case "2" -> outcome = WebhookEvent.Outcome.SUCCEEDED;
+            case "0" -> outcome = WebhookEvent.Outcome.PENDING;
+            case "-1" -> outcome = WebhookEvent.Outcome.CANCELLED;
+            case "-2" -> outcome = WebhookEvent.Outcome.FAILED;
+            case "-3" -> outcome = WebhookEvent.Outcome.CHARGED_BACK;
             default -> throw new InvalidStateException("Unknown PayHere status_code: " + statusCode);
-        };
+        }
+
+        String paymentId = params.get("payment_id");
+        // PayHere does not send a unique event id. A payment_id + status pair identifies "this payment
+        // reached this status", so exact retries dedupe but real status changes (0 -> 2) still apply.
+        String eventId = (paymentId != null && !paymentId.isBlank() ? paymentId : orderId) + ":" + statusCode.trim();
+
+        return new WebhookEvent(
+                eventId,
+                orderId,
+                outcome,
+                PayHereSignatures.parseAmountToMinor(amount),
+                currency,
+                paymentId,
+                params.get("status_message"),
+                sanitize(params));
     }
 
-    private static Map<String, String> parseFormBody(String rawBody) {
-        Map<String, String> params = new LinkedHashMap<>();
-        if (rawBody == null || rawBody.isBlank()) {
-            return params;
+    /** Persist only non-sensitive fields; card_holder_name / card_no / card_expiry / md5sig are dropped. */
+    private String sanitize(Map<String, String> params) {
+        Map<String, String> safe = new LinkedHashMap<>();
+        for (String key : new String[]{"order_id", "payment_id", "status_code", "status_message",
+                "payhere_amount", "payhere_currency", "method", "custom_1"}) {
+            if (params.containsKey(key)) {
+                safe.put(key, params.get(key));
+            }
         }
-        for (String pair : rawBody.split("&")) {
-            if (pair.isBlank()) {
+        try {
+            return objectMapper.writeValueAsString(safe);
+        } catch (JsonProcessingException e) {
+            return "{}";
+        }
+    }
+
+    /** Parses an application/x-www-form-urlencoded body; first occurrence of a key wins. */
+    static Map<String, String> parseFormBody(String body) {
+        Map<String, String> result = new LinkedHashMap<>();
+        for (String pair : body.split("&")) {
+            if (pair.isEmpty()) {
                 continue;
             }
             int idx = pair.indexOf('=');
             String key = idx >= 0 ? pair.substring(0, idx) : pair;
             String value = idx >= 0 ? pair.substring(idx + 1) : "";
-            params.put(
-                    URLDecoder.decode(key, StandardCharsets.UTF_8),
-                    URLDecoder.decode(value, StandardCharsets.UTF_8));
+            try {
+                result.putIfAbsent(
+                        URLDecoder.decode(key, StandardCharsets.UTF_8),
+                        URLDecoder.decode(value, StandardCharsets.UTF_8));
+            } catch (IllegalArgumentException e) {
+                throw new InvalidSignatureException("Malformed payment notification");
+            }
         }
-        return params;
+        return result;
     }
 
-    private static String required(Map<String, String> params, String name) {
-        String value = trimToNull(params.get(name));
-        if (value == null) {
-            throw new InvalidStateException("PayHere callback is missing required field: " + name);
+    private static String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    private static String stripTrailingSlash(String url) {
+        if (url == null) {
+            return "";
         }
-        return value;
-    }
-
-    static boolean constantTimeEquals(String expected, String actual) {
-        if (expected == null || actual == null) {
-            return false;
-        }
-        return MessageDigest.isEqual(
-                expected.getBytes(StandardCharsets.UTF_8),
-                actual.getBytes(StandardCharsets.UTF_8));
-    }
-
-    static String md5Hex(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            // PayHere compares uppercase hex strings for both hash and md5sig.
-            return HexFormat.of().formatHex(md.digest(input.getBytes(StandardCharsets.UTF_8)))
-                    .toUpperCase(Locale.ROOT);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("JVM does not provide MD5", e);
-        }
-    }
-
-    private static String safe(String value, String fallback) {
-        String trimmed = trimToNull(value);
-        return trimmed == null ? fallback : trimmed;
-    }
-
-    private static String trimToNull(String value) {
-        if (value == null) {
-            return null;
-        }
-        String trimmed = value.trim();
-        return trimmed.isEmpty() ? null : trimmed;
-    }
-
-    private static String jsonEscape(String value) {
-        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+        String trimmed = url.trim();
+        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
     }
 }

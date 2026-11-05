@@ -4,12 +4,8 @@ import com.railbound.portal.announcements.Announcement;
 import com.railbound.portal.announcements.AnnouncementRepository;
 import com.railbound.portal.bundles.CoinBundle;
 import com.railbound.portal.bundles.CoinBundleRepository;
-import com.railbound.portal.flags.FeatureFlag;
-import com.railbound.portal.flags.FeatureFlagRepository;
 import com.railbound.portal.identity.User;
 import com.railbound.portal.identity.UserRepository;
-import com.railbound.portal.releases.ItemVersion;
-import com.railbound.portal.releases.ItemVersionRepository;
 import com.railbound.portal.shop.ItemCategory;
 import com.railbound.portal.shop.PublicationStatus;
 import com.railbound.portal.shop.ShopItem;
@@ -21,9 +17,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -37,34 +30,26 @@ public class DataInitializer implements CommandLineRunner {
     private final AnnouncementRepository announcementRepository;
     private final UserRepository userRepository;
     private final WalletRepository walletRepository;
-    private final FeatureFlagRepository featureFlagRepository;
-    private final ItemVersionRepository itemVersionRepository;
 
     public DataInitializer(
             CoinBundleRepository bundleRepository,
             ShopItemRepository itemRepository,
             AnnouncementRepository announcementRepository,
             UserRepository userRepository,
-            WalletRepository walletRepository,
-            FeatureFlagRepository featureFlagRepository,
-            ItemVersionRepository itemVersionRepository) {
+            WalletRepository walletRepository) {
         this.bundleRepository = bundleRepository;
         this.itemRepository = itemRepository;
         this.announcementRepository = announcementRepository;
         this.userRepository = userRepository;
         this.walletRepository = walletRepository;
-        this.featureFlagRepository = featureFlagRepository;
-        this.itemVersionRepository = itemVersionRepository;
     }
 
     @Override
     public void run(String... args) {
         seedBundles();
         seedShopItems();
-        seedContentVersions();
         seedAnnouncements();
         seedDemoUsers();
-        seedFeatureFlags();
         log.info("Railbound Battle Royale seed initialization complete.");
     }
 
@@ -167,53 +152,8 @@ public class DataInitializer implements CommandLineRunner {
         }
     }
 
-    /**
-     * Every seeded catalog item gets a validated {@code item_version} so the
-     * publish gate and the client manifest have real data from the first run.
-     * Checksums are deterministic placeholders: replace them with the real
-     * bundle SHA-256 when actual Unity content is built.
-     */
-    private void seedContentVersions() {
-        if (itemVersionRepository.count() > 0) {
-            return;
-        }
-        log.info("Seeding baseline content versions for published catalog items...");
-        long size = 262_144L;
-        for (ShopItem item : itemRepository.findAll()) {
-            String sha256 = sha256Hex(item.getSku() + ":1.0.0");
-            String bundleKey = "bundles/" + item.getSku() + "/" + item.getSku() + "_1.0.0.bundle";
-            ItemVersion version = new ItemVersion(
-                    item.getSku(), "1.0.0", "1.0.0", bundleKey, sha256, size, "SYSTEM");
-            version.setValidationStatus(ItemVersion.VALIDATION_VALID);
-            itemVersionRepository.save(version);
-            size += 65_536L;
-        }
-    }
-
-    private void seedFeatureFlags() {
-        if (featureFlagRepository.count() > 0) {
-            return;
-        }
-        log.info("Seeding default feature flags...");
-        featureFlagRepository.saveAll(List.of(
-                new FeatureFlag("realCoinsEnabled", "Paid Real Coin top-ups and shop purchases", true),
-                new FeatureFlag("gameCoinsEnabled", "Earned Game Coin economy (deferred)", false),
-                new FeatureFlag("shopEnabled", "Armory catalog and purchasing", true),
-                new FeatureFlag("topUpEnabled", "Real Coin top-up checkout", true),
-                new FeatureFlag("notificationsEnabled", "Player notification inbox", true)
-        ));
-    }
-
-    private static String sha256Hex(String value) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
-        }
-    }
-
-    private void seedAnnouncements() {        if (announcementRepository.count() == 0) {
+    private void seedAnnouncements() {
+        if (announcementRepository.count() == 0) {
             log.info("Seeding initial game announcements...");
             announcementRepository.saveAll(List.of(
                     new Announcement(

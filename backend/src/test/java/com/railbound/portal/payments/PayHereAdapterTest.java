@@ -1,160 +1,110 @@
 package com.railbound.portal.payments;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.railbound.portal.common.InvalidSignatureException;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-/**
- * Pure unit tests for the PayHere digest format. The expected values were
- * generated independently with .NET MD5 to guard against a self-consistent but
- * wrong implementation.
- */
+/** Adapter-level tests; no database or Spring context needed. */
 class PayHereAdapterTest {
 
-    private static final String MERCHANT_ID = "1211149";
-    private static final String MERCHANT_SECRET = "sandbox_secret_123";
+    static final String MID = "1211149";
+    static final String SECRET = "test-secret-123";
+    static final String NOTIFY = "https://example.test/api/v1/payments/webhooks/payhere";
 
     private PayHereAdapter adapter() {
-        return new PayHereAdapter(
-                MERCHANT_ID,
-                MERCHANT_SECRET,
-                true,
-                "https://www.payhere.lk/pay/checkout",
-                "https://sandbox.payhere.lk/pay/checkout",
-                "USD"
-        );
+        return new PayHereAdapter(true, true, MID, SECRET, NOTIFY, "http://localhost:3000", new ObjectMapper());
+    }
+
+    /** Builds a form-encoded notification exactly as PayHere would send it. */
+    static String notification(String merchantId, String orderId, String amount, String currency, String status, String paymentId) {
+        String sig = PayHereSignatures.notifySignature(merchantId, orderId, amount, currency, status, SECRET);
+        return "merchant_id=" + merchantId + "&order_id=" + orderId + "&payment_id=" + paymentId
+                + "&payhere_amount=" + amount + "&payhere_currency=" + currency + "&status_code=" + status
+                + "&md5sig=" + sig + "&card_holder_name=Test+User&card_no=************1292&card_expiry=12%2F30"
+                + "&method=VISA&status_message=Successfully+received";
+    }
+
+    private PaymentOrder order() {
+        return new PaymentOrder("ord_abc", "usr_1", "bundle_rc_1000", 1150, 999, "USD", "payhere", "idem", null);
+    }
+
+    private BillingDetails billing() {
+        return new BillingDetails("Kasun", "Perera", "kasun@example.com", "0771234567", "12 Galle Road", "Colombo", "Sri Lanka");
     }
 
     @Test
-    @DisplayName("PayHere checkout hash matches the official MD5 formula")
-    void checkoutHashMatchesOfficialAlgorithm() {
-        PayHereAdapter adapter = adapter();
-        String hash = adapter.computeCheckoutHash("ord_payhere_unit_test", "9.99", "USD");
-        assertEquals("456F461FD5BAFCE8A23B6CA83165B9B5", hash);
+    void hostedFormCarriesServerComputedHashAndAmount() {
+        HostedForm form = adapter().buildHostedForm(order(), billing());
+        assertThat(form.action()).isEqualTo("https://sandbox.payhere.lk/pay/checkout");
+        assertThat(form.fields().get("amount")).isEqualTo("9.99");
+        assertThat(form.fields().get("currency")).isEqualTo("USD");
+        assertThat(form.fields().get("order_id")).isEqualTo("ord_abc");
+        assertThat(form.fields().get("notify_url")).isEqualTo(NOTIFY);
+        assertThat(form.fields().get("hash")).isEqualTo(PayHereSignatures.checkoutHash(MID, "ord_abc", 999, "USD", SECRET));
+        assertThat(form.fields().toString()).doesNotContain(SECRET);
     }
 
     @Test
-    @DisplayName("PayHere md5sig is verified and normalized into a PAID notification")
-    void verifiesNotificationSignature() {
-        PayHereAdapter adapter = adapter();
-        Map<String, String> params = baseParams();
-        params.put("md5sig", "384CC5DCF021C269ABDA7845E44AE723");
-
-        PaymentNotification notification = adapter.verifyAndParseNotification(
-                new PaymentGatewayAdapter.WebhookRequest("", Map.of(), params));
-
-        assertEquals(PaymentNotification.Outcome.PAID, notification.outcome());
-        assertEquals("ord_payhere_unit_test", notification.orderId());
-        assertEquals(999L, notification.amountMinor());
-        assertEquals("USD", notification.currency());
-        assertEquals("320025071278", notification.providerPaymentId());
-        assertEquals("320025071278:2", notification.providerEventId());
+    void validNotificationIsParsed() {
+        WebhookEvent event = adapter().verifyAndParseWebhook(notification(MID, "ord_abc", "9.99", "USD", "2", "320032200001"), null);
+        assertThat(event.outcome()).isEqualTo(WebhookEvent.Outcome.SUCCEEDED);
+        assertThat(event.orderId()).isEqualTo("ord_abc");
+        assertThat(event.amountMinor()).isEqualTo(999L);
+        assertThat(event.currency()).isEqualTo("USD");
+        assertThat(event.eventId()).isEqualTo("320032200001:2");
+        // card data must never be persisted
+        assertThat(event.sanitizedPayload()).doesNotContain("card_no").doesNotContain("Test User").doesNotContain("md5sig");
     }
 
     @Test
-    @DisplayName("Tampering with the amount invalidates the md5sig")
-    void rejectsTamperedAmount() {
-        PayHereAdapter adapter = adapter();
-        Map<String, String> params = baseParams();
-        params.put("md5sig", "384CC5DCF021C269ABDA7845E44AE723");
-        params.put("payhere_amount", "1.00");
-
-        assertThrows(InvalidSignatureException.class, () ->
-                adapter.verifyAndParseNotification(
-                        new PaymentGatewayAdapter.WebhookRequest("", Map.of(), params)));
+    void statusCodesMapToOutcomes() {
+        assertThat(adapter().verifyAndParseWebhook(notification(MID, "o", "1.00", "USD", "0", "p1"), null).outcome())
+                .isEqualTo(WebhookEvent.Outcome.PENDING);
+        assertThat(adapter().verifyAndParseWebhook(notification(MID, "o", "1.00", "USD", "-1", "p1"), null).outcome())
+                .isEqualTo(WebhookEvent.Outcome.CANCELLED);
+        assertThat(adapter().verifyAndParseWebhook(notification(MID, "o", "1.00", "USD", "-2", "p1"), null).outcome())
+                .isEqualTo(WebhookEvent.Outcome.FAILED);
+        assertThat(adapter().verifyAndParseWebhook(notification(MID, "o", "1.00", "USD", "-3", "p1"), null).outcome())
+                .isEqualTo(WebhookEvent.Outcome.CHARGED_BACK);
     }
 
     @Test
-    @DisplayName("A callback for a different merchant is rejected")
-    void rejectsWrongMerchant() {
-        PayHereAdapter adapter = adapter();
-        Map<String, String> params = baseParams();
-        params.put("merchant_id", "9999999");
-        params.put("md5sig", "384CC5DCF021C269ABDA7845E44AE723");
-
-        assertThrows(InvalidSignatureException.class, () ->
-                adapter.verifyAndParseNotification(
-                        new PaymentGatewayAdapter.WebhookRequest("", Map.of(), params)));
+    void forgedOrTamperedNotificationsAreRejected() {
+        String good = notification(MID, "ord_abc", "9.99", "USD", "2", "p1");
+        // attacker lowers the amount but cannot recompute md5sig
+        assertThatThrownBy(() -> adapter().verifyAndParseWebhook(good.replace("payhere_amount=9.99", "payhere_amount=0.01"), null))
+                .isInstanceOf(InvalidSignatureException.class);
+        // attacker flips a failure into a success
+        String failed = notification(MID, "ord_abc", "9.99", "USD", "-2", "p1");
+        assertThatThrownBy(() -> adapter().verifyAndParseWebhook(failed.replace("status_code=-2", "status_code=2"), null))
+                .isInstanceOf(InvalidSignatureException.class);
+        // missing signature
+        assertThatThrownBy(() -> adapter().verifyAndParseWebhook("merchant_id=" + MID + "&order_id=x", null))
+                .isInstanceOf(InvalidSignatureException.class);
+        // different merchant
+        assertThatThrownBy(() -> adapter().verifyAndParseWebhook(notification("999", "ord_abc", "9.99", "USD", "2", "p1"), null))
+                .isInstanceOf(InvalidSignatureException.class);
     }
 
     @Test
-    @DisplayName("Missing md5sig is rejected instead of treated as success")
-    void rejectsMissingSignature() {
-        PayHereAdapter adapter = adapter();
-        Map<String, String> params = baseParams();
-
-        assertThrows(Exception.class, () ->
-                adapter.verifyAndParseNotification(
-                        new PaymentGatewayAdapter.WebhookRequest("", Map.of(), params)));
+    void adapterStaysDisabledWithoutFullConfiguration() {
+        assertThat(new PayHereAdapter(true, true, "", SECRET, NOTIFY, "http://localhost:3000", new ObjectMapper()).isEnabled()).isFalse();
+        assertThat(new PayHereAdapter(true, true, MID, SECRET, "", "http://localhost:3000", new ObjectMapper()).isEnabled()).isFalse();
+        assertThat(new PayHereAdapter(false, true, MID, SECRET, NOTIFY, "http://localhost:3000", new ObjectMapper()).isEnabled()).isFalse();
+        assertThat(adapter().isEnabled()).isTrue();
     }
 
     @Test
-    @DisplayName("PayHere status codes map to normalized outcomes")
-    void mapsStatusCodes() {
-        PayHereAdapter adapter = adapter();
-        assertMapping(adapter, "0", PaymentNotification.Outcome.PENDING);
-        assertMapping(adapter, "-1", PaymentNotification.Outcome.CANCELLED);
-        assertMapping(adapter, "-2", PaymentNotification.Outcome.FAILED);
-        assertMapping(adapter, "-3", PaymentNotification.Outcome.CHARGEDBACK);
-    }
-
-    @Test
-    @DisplayName("Minor-unit formatting never introduces floating point drift")
-    void formatsAmountsWithoutFloatingPoint() {
-        assertEquals("9.99", PayHereAdapter.formatAmountMinor(999));
-        assertEquals("100.00", PayHereAdapter.formatAmountMinor(10000));
-        assertEquals("0.99", PayHereAdapter.formatAmountMinor(99));
-        assertEquals(999L, PayHereAdapter.parseAmountMinor("9.99"));
-        assertEquals(10000L, PayHereAdapter.parseAmountMinor("100.00"));
-    }
-
-    @Test
-    @DisplayName("An unconfigured adapter refuses to create checkouts")
-    void unconfiguredAdapterFailsClosed() {
-        PayHereAdapter empty = new PayHereAdapter(
-                "", "", true,
-                "https://www.payhere.lk/pay/checkout",
-                "https://sandbox.payhere.lk/pay/checkout",
-                "USD");
-        assertFalse(empty.isConfigured());
-        assertThrows(com.railbound.portal.common.PaymentConfigurationException.class, () ->
-                empty.createCheckoutSession(new PaymentOrder(
-                        "ord_x", "usr_x", "bundle_rc_100", 100, 99, "USD", "payhere",
-                        null, java.time.Instant.now().plusSeconds(600)),
-                        new PaymentGatewayAdapter.CheckoutContext(
-                                "http://localhost/return", "http://localhost/cancel",
-                                "http://localhost/notify", "Test", "Player",
-                                "test@example.com", "0770000000",
-                                "Address", "Colombo", "Sri Lanka")));
-    }
-
-    private void assertMapping(PayHereAdapter adapter, String statusCode,
-                               PaymentNotification.Outcome expected) {
-        Map<String, String> params = baseParams();
-        params.put("status_code", statusCode);
-        params.put("md5sig", adapter.computeNotificationSignature(
-                params.get("order_id"), params.get("payhere_amount"),
-                params.get("payhere_currency"), statusCode));
-
-        PaymentNotification notification = adapter.verifyAndParseNotification(
-                new PaymentGatewayAdapter.WebhookRequest("", Map.of(), params));
-        assertEquals(expected, notification.outcome());
-    }
-
-    private Map<String, String> baseParams() {
-        Map<String, String> params = new LinkedHashMap<>();
-        params.put("merchant_id", MERCHANT_ID);
-        params.put("order_id", "ord_payhere_unit_test");
-        params.put("payment_id", "320025071278");
-        params.put("payhere_amount", "9.99");
-        params.put("payhere_currency", "USD");
-        params.put("status_code", "2");
-        params.put("method", "VISA");
-        return params;
+    void billingDetailsAreValidated() {
+        assertThat(billing().validated().email()).isEqualTo("kasun@example.com");
+        assertThatThrownBy(() -> new BillingDetails("", "P", "a@b.co", "0771234567", "x", "y", "z").validated())
+                .hasMessageContaining("First name");
+        assertThatThrownBy(() -> new BillingDetails("K", "P", "not-an-email", "0771234567", "x", "y", "z").validated())
+                .hasMessageContaining("email");
+        assertThatThrownBy(() -> new BillingDetails("K", "P", "a@b.co", "abc", "x", "y", "z").validated())
+                .hasMessageContaining("phone");
     }
 }

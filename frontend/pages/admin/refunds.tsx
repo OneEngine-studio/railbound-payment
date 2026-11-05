@@ -1,55 +1,80 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "../../lib/api";
-import { ArrowLeft, ShieldAlert, CheckCircle2, RotateCcw, AlertTriangle, Clock } from "lucide-react";
+import { ArrowLeft, ShieldAlert, RotateCcw, RefreshCw } from "lucide-react";
+
+const STATUS_STYLE: Record<string, string> = {
+  COINS_REVERSED: "bg-amber-500/10 text-amber-400 border-amber-500/30",
+  NEEDS_REVIEW: "bg-rose-500/10 text-rose-400 border-rose-500/30",
+  COMPLETED: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+};
 
 export default function AdminRefundsPage() {
+  const [cases, setCases] = useState<any[]>([]);
+  const [review, setReview] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
   const [orderId, setOrderId] = useState("");
   const [reason, setReason] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<any | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [cases, setCases] = useState<any[]>([]);
-  const [loadingCases, setLoadingCases] = useState(true);
+  const [busy, setBusy] = useState(false);
 
-  const loadCases = async () => {
+  const load = useCallback(async () => {
     try {
-      const data = await api.adminGetRefunds();
-      setCases(data);
-    } catch {
-      // Avoid noisy UI if the finance role is not granted.
+      const [c, r] = await Promise.all([api.adminGetRefunds(), api.adminGetOrdersInReview()]);
+      setCases(c);
+      setReview(r);
+      setError(null);
+    } catch (err: any) {
+      setError(err.message || "Failed to load refund data (finance role required)");
     } finally {
-      setLoadingCases(false);
+      setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    loadCases();
   }, []);
 
-  const handleRefund = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSubmitting(true);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const run = async (action: () => Promise<any>, okMessage: string) => {
+    setBusy(true);
     setError(null);
-    setResult(null);
+    setNotice(null);
     try {
-      const refund = await api.adminRequestRefund(orderId.trim(), reason.trim());
-      setResult(refund);
-      setOrderId("");
-      setReason("");
-      await loadCases();
+      await action();
+      setNotice(okMessage);
+      await load();
     } catch (err: any) {
-      setError(err.message || "Refund request failed");
+      setError(err.message || "Action failed");
     } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
   };
 
-  const statusColor = (status: string) => {
-    if (status === "COMPLETED") return "text-emerald-400 border-emerald-500/30 bg-emerald-500/10";
-    if (status === "REVIEW_REQUIRED") return "text-amber-400 border-amber-500/30 bg-amber-500/10";
-    if (status === "FAILED") return "text-rose-400 border-rose-500/30 bg-rose-500/10";
-    return "text-sky-300 border-sky-500/30 bg-sky-500/10";
+  const handleRefund = (e: React.FormEvent) => {
+    e.preventDefault();
+    run(async () => {
+      await api.adminCreateRefund(orderId.trim(), reason.trim());
+      setOrderId("");
+      setReason("");
+    }, "Refund case created.");
+  };
+
+  const confirmRefund = (refundId: string) => {
+    const ref = window.prompt("PayHere refund reference (optional). Only confirm after refunding in the PayHere dashboard:");
+    if (ref === null) return;
+    run(() => api.adminConfirmRefund(refundId, ref), "Refund confirmed.");
+  };
+
+  const resolveReview = (order: any, approve: boolean) => {
+    const note = window.prompt(
+      approve
+        ? "Approve: confirm in the PayHere dashboard that the full amount was paid. Enter a note:"
+        : "Reject: enter the reason:"
+    );
+    if (!note || !note.trim()) return;
+    run(() => api.adminResolveReview(order.orderId, approve, note.trim()), approve ? "Payment approved and coins credited." : "Payment rejected.");
   };
 
   return (
@@ -58,140 +83,137 @@ export default function AdminRefundsPage() {
         <Link href="/admin" className="text-zinc-500 hover:text-white transition-colors">
           <ArrowLeft className="h-4 w-4" />
         </Link>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100">Dispute & Refund Workflows</h1>
+        <div className="flex-1">
+          <h1 className="text-2xl font-bold tracking-tight text-zinc-100">Disputes, Refunds & Payment Review</h1>
           <p className="text-xs text-zinc-400 mt-0.5">
-            PayHere Refund API + non-negative Real Coin reversal review.
+            Coin reversal never takes a balance below zero. Money refunds are made in the PayHere dashboard and confirmed here.
           </p>
+        </div>
+        <button onClick={load} className="text-zinc-400 hover:text-white" title="Refresh">
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
+
+      {error && <div className="mb-4 rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">{error}</div>}
+      {notice && <div className="mb-4 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300">{notice}</div>}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
+        <div className="rounded-xl border border-white/[0.08] bg-[#121215] p-5 text-xs text-zinc-400 leading-relaxed">
+          <h2 className="text-sm font-bold text-zinc-100 mb-2 flex items-center gap-2">
+            <ShieldAlert className="h-4 w-4 text-amber-400" />
+            How reversals work
+          </h2>
+          <p className="mb-2">
+            Creating a refund removes the order&apos;s coins from the player&apos;s wallet and writes a negative <code>REFUND</code> ledger entry. If the player has already spent the coins, the case is parked as <strong>NEEDS_REVIEW</strong> instead of creating a negative balance. Review the player&apos;s purchases, then retry.
+          </p>
+          <p>
+            After the coins are reversed, refund the customer in the PayHere dashboard and press <strong>Confirm refunded</strong>. Chargebacks reported by PayHere open a case automatically.
+          </p>
+        </div>
+
+        <div className="rounded-2xl border border-white/[0.08] bg-[#121215] p-6">
+          <h2 className="text-sm font-bold text-zinc-100 mb-4">Open a refund</h2>
+          <form onSubmit={handleRefund} className="space-y-4 text-xs font-mono">
+            <div>
+              <label className="block text-zinc-400 uppercase text-[10px] mb-1">Order ID (COMPLETED orders only)</label>
+              <input
+                type="text"
+                required
+                placeholder="ord_..."
+                value={orderId}
+                onChange={(e) => setOrderId(e.target.value)}
+                className="w-full rounded-md border border-white/10 bg-zinc-950 px-3 py-2 text-zinc-200 focus:border-amber-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-zinc-400 uppercase text-[10px] mb-1">Reason</label>
+              <textarea
+                required
+                rows={3}
+                placeholder="Customer request / dispute reference..."
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full rounded-md border border-white/10 bg-zinc-950 px-3 py-2 text-zinc-200 focus:border-amber-500 focus:outline-none font-sans"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={busy}
+              className="w-full flex items-center justify-center gap-2 rounded-md bg-rose-500 py-2.5 text-xs font-semibold text-white hover:bg-rose-400 disabled:opacity-50 transition-colors"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Create refund case
+            </button>
+          </form>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <div className="space-y-4 text-xs text-zinc-400 leading-relaxed">
-          <div className="rounded-xl border border-white/[0.08] bg-[#121215] p-5">
-            <h2 className="text-sm font-bold text-zinc-100 mb-2 flex items-center gap-2">
-              <ShieldAlert className="h-4 w-4 text-amber-400" />
-              Non-Negative Balance Rule
-            </h2>
-            <p>
-              A refund never silently reduces a player&apos;s Real Coin balance below zero. If the coins were
-              already spent on catalog items, PayHere can still refund the fiat payment, but the case becomes{" "}
-              <span className="font-mono text-amber-300">REVIEW_REQUIRED</span> so support can review
-              entitlement revocation instead of creating coin debt.
-            </p>
-          </div>
+      <h2 className="text-sm font-bold text-zinc-100 mb-3">Payments awaiting review ({review.length})</h2>
+      <div className="mb-10 rounded-xl border border-white/[0.08] bg-[#121215] overflow-hidden">
+        {review.length === 0 ? (
+          <div className="p-5 text-xs text-zinc-500 font-mono">No payments are waiting for review.</div>
+        ) : (
+          <table className="w-full text-left text-xs">
+            <tbody className="divide-y divide-white/5">
+              {review.map((o) => (
+                <tr key={o.orderId}>
+                  <td className="px-4 py-3 font-mono text-zinc-300 break-all">{o.orderId}</td>
+                  <td className="px-4 py-3 text-zinc-400">{o.statusMessage}</td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button disabled={busy} onClick={() => resolveReview(o, true)} className="mr-2 rounded bg-emerald-600 px-2 py-1 text-[11px] text-white hover:bg-emerald-500 disabled:opacity-50">Approve</button>
+                    <button disabled={busy} onClick={() => resolveReview(o, false)} className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-white hover:bg-zinc-600 disabled:opacity-50">Reject</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
 
-          <div className="rounded-xl border border-white/[0.08] bg-[#121215] p-5">
-            <h2 className="text-sm font-bold text-zinc-100 mb-2">Double-Entry Audit</h2>
-            <p>
-              Every successful reversal appends an immutable <span className="font-mono">REFUND</span> ledger
-              entry with a negative delta, preserving the invariant: sum of ledger deltas == current wallet
-              balance. The provider refund id is stored in <span className="font-mono">refund_cases</span>.
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-white/[0.08] bg-[#121215] p-5">
-            <h2 className="text-sm font-bold text-zinc-100 mb-2">Requirements</h2>
-            <p>
-              Set <span className="font-mono">PAYHERE_APP_ID</span> and{" "}
-              <span className="font-mono">PAYHERE_APP_SECRET</span> with the &quot;Automated Charging API&quot;
-              permission. Refunds are only available after PayHere confirmed the payment (order status{" "}
-              <span className="font-mono">COMPLETED</span>).
-            </p>
-          </div>
-        </div>
-
-        <div className="space-y-6">
-          <div className="rounded-2xl border border-white/[0.08] bg-[#121215] p-6">
-            <h2 className="text-sm font-bold text-zinc-100 mb-4">Execute Controlled Refund</h2>
-
-            {result && (
-              <div className="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4 text-xs text-emerald-300">
-                <div className="flex items-center gap-2 font-semibold">
-                  <CheckCircle2 className="h-4 w-4" />
-                  Refund case {result.status}
-                </div>
-                <p className="mt-1 text-[11px] text-zinc-400">
-                  Case {result.refundCaseId} — reversed {result.coinsReversed} / {result.coinsToReverse} RC.
-                  {result.status === "REVIEW_REQUIRED" &&
-                    " Provider refund succeeded; coin reversal needs support review."}
-                </p>
-              </div>
-            )}
-
-            {error && (
-              <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-4 text-xs text-rose-300">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleRefund} className="space-y-4 text-xs font-mono">
-              <div>
-                <label className="block text-zinc-400 uppercase text-[10px] mb-1">Target Order ID</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="ord_550b1207-98fd-4386..."
-                  value={orderId}
-                  onChange={(e) => setOrderId(e.target.value)}
-                  className="w-full rounded-md border border-white/10 bg-zinc-950 px-3 py-2 text-zinc-200 focus:border-amber-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-zinc-400 uppercase text-[10px] mb-1">
-                  Dispute Reason / Chargeback Reference
-                </label>
-                <textarea
-                  required
-                  rows={3}
-                  placeholder="Payment provider dispute case ID and audit rationale..."
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  className="w-full rounded-md border border-white/10 bg-zinc-950 px-3 py-2 text-zinc-200 focus:border-amber-500 focus:outline-none font-sans"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full flex items-center justify-center gap-2 rounded-md bg-rose-500 py-2.5 text-xs font-semibold text-white hover:bg-rose-400 disabled:opacity-50 transition-colors"
-              >
-                <RotateCcw className={`h-3.5 w-3.5 ${submitting ? "animate-spin" : ""}`} />
-                {submitting ? "Requesting PayHere Refund..." : "Submit Authorized Reversal"}
-              </button>
-            </form>
-          </div>
-
-          <div className="rounded-2xl border border-white/[0.08] bg-[#121215] p-6">
-            <h2 className="text-sm font-bold text-zinc-100 mb-3 flex items-center gap-2">
-              <Clock className="h-4 w-4 text-zinc-400" />
-              Recent Refund Cases
-            </h2>
-            {loadingCases ? (
-              <p className="text-xs text-zinc-500">Loading cases...</p>
-            ) : cases.length === 0 ? (
-              <p className="text-xs text-zinc-500">No refund cases recorded.</p>
-            ) : (
-              <ul className="space-y-2 text-[11px] font-mono">
-                {cases.slice(0, 8).map((c) => (
-                  <li key={c.refundCaseId} className="rounded border border-white/5 bg-zinc-950 p-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-zinc-300 break-all">{c.orderId}</span>
-                      <span className={`rounded border px-1.5 py-0.5 text-[9px] font-bold ${statusColor(c.status)}`}>
-                        {c.status}
-                      </span>
-                    </div>
-                    <div className="mt-1 text-zinc-500">
-                      {c.coinsReversed}/{c.coinsToReverse} RC · {c.providerRefundId || "no refund id"}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </div>
+      <h2 className="text-sm font-bold text-zinc-100 mb-3">Refund & chargeback cases ({cases.length})</h2>
+      <div className="rounded-xl border border-white/[0.08] bg-[#121215] overflow-x-auto">
+        {loading ? (
+          <div className="p-5 text-xs text-zinc-500 font-mono">Loading...</div>
+        ) : cases.length === 0 ? (
+          <div className="p-5 text-xs text-zinc-500 font-mono">No refund cases yet.</div>
+        ) : (
+          <table className="w-full text-left text-xs">
+            <thead className="bg-zinc-950/50 text-[10px] uppercase text-zinc-500 font-mono">
+              <tr>
+                <th className="px-4 py-3">Case</th>
+                <th className="px-4 py-3">Order</th>
+                <th className="px-4 py-3">Type</th>
+                <th className="px-4 py-3 text-right">Coins</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {cases.map((c) => (
+                <tr key={c.refundId} className="align-top">
+                  <td className="px-4 py-3 font-mono text-zinc-400 break-all">{c.refundId}</td>
+                  <td className="px-4 py-3 font-mono text-zinc-300 break-all">{c.orderId}</td>
+                  <td className="px-4 py-3 text-zinc-300">{c.type}</td>
+                  <td className="px-4 py-3 text-right font-mono text-zinc-300">
+                    {c.coinsReversed.toLocaleString()} / {c.coinsToReverse.toLocaleString()}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`rounded border px-2 py-0.5 text-[9px] font-bold uppercase ${STATUS_STYLE[c.status] || ""}`}>{c.status}</span>
+                    {c.resolutionNote && <div className="mt-1 max-w-xs text-[11px] text-zinc-500">{c.resolutionNote}</div>}
+                  </td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    {c.status === "NEEDS_REVIEW" && (
+                      <button disabled={busy} onClick={() => run(() => api.adminRetryRefund(c.refundId), "Reversal retried.")} className="rounded bg-amber-500 px-2 py-1 text-[11px] font-semibold text-black hover:bg-amber-400 disabled:opacity-50">Retry reversal</button>
+                    )}
+                    {c.status === "COINS_REVERSED" && c.type === "REFUND" && (
+                      <button disabled={busy} onClick={() => confirmRefund(c.refundId)} className="rounded bg-emerald-600 px-2 py-1 text-[11px] text-white hover:bg-emerald-500 disabled:opacity-50">Confirm refunded</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

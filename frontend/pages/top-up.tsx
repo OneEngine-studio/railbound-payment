@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/router";
-import { api, PAYMENT_PROVIDER, MOCK_PAYMENTS_ENABLED } from "../lib/api";
+import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Coins, ShieldCheck, Zap, ArrowRight, Lock, Check } from "lucide-react";
 
@@ -10,29 +10,42 @@ export default function TopUp() {
   const [bundles, setBundles] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [initiatingSku, setInitiatingSku] = useState<string | null>(null);
-  const [provider, setProvider] = useState(PAYMENT_PROVIDER);
-  const [gatewayError, setGatewayError] = useState<string | null>(null);
+  const [providers, setProviders] = useState<any[]>([]);
+  const [provider, setProvider] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.getBundles()
       .then(setBundles)
       .finally(() => setLoading(false));
+    api.getPaymentProviders()
+      .then((list: any[]) => {
+        setProviders(list);
+        if (list.length > 0) setProvider(list[0].id);
+      })
+      .catch(() => setProviders([]));
   }, []);
 
   const handleSelectBundle = async (bundleSku: string) => {
+    if (!provider) {
+      setError("No payment provider is available right now. Please try again later.");
+      return;
+    }
+    setError(null);
     setInitiatingSku(bundleSku);
-    setGatewayError(null);
     try {
       const idempotencyKey = "web_topup_" + Math.random().toString(36).substring(2, 12);
       const session = await api.createCheckoutSession(bundleSku, provider, idempotencyKey);
 
-      // Hosted checkout bridge: for PayHere this is the frontend page that
-      // auto-submits the signed form to the gateway.
+      // PayHere: our /checkout/pay page collects billing details and posts to PayHere.
+      // Mock: the dev-only hosted mock page. Either way the server decides where to go.
       if (session.checkoutUrl) {
         window.location.href = session.checkoutUrl;
+      } else {
+        throw new Error("This order can no longer be paid. Please start a new top-up.");
       }
     } catch (err: any) {
-      setGatewayError(err.message || "Failed to initiate checkout session");
+      setError("Failed to start checkout: " + err.message);
       setInitiatingSku(null);
     }
   };
@@ -43,37 +56,38 @@ export default function TopUp() {
       <div className="max-w-2xl mb-10">
         <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-mono text-amber-400 mb-3">
           <ShieldCheck className="h-3.5 w-3.5" />
-          <span>HOSTED CHECKOUT GATEWAY // PCI-SAFE</span>
+          <span>HOSTED CHECKOUT // CARD DETAILS NEVER TOUCH RAILBOUND</span>
         </div>
         <h1 className="text-3xl font-bold tracking-tight text-zinc-100">Top-Up Real Coins</h1>
         <p className="mt-2 text-sm text-zinc-400 leading-relaxed">
-          Select a verified Real Coin bundle. Coins are authoritatively minted upon cryptographic gateway callback fulfillment. Never wait for manual intervention.
+          Select a Real Coin bundle. Coins are added to your wallet only after the payment provider confirms your payment to our server.
         </p>
-
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-[11px] font-mono text-emerald-300">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            PayHere secure hosted checkout
-          </span>
-
-          {MOCK_PAYMENTS_ENABLED && (
-            <label className="inline-flex items-center gap-2 text-[11px] font-mono text-zinc-400">
-              <span>Gateway:</span>
-              <select
-                value={provider}
-                onChange={(e) => setProvider(e.target.value)}
-                className="rounded-md border border-white/10 bg-zinc-950 px-2 py-1 text-zinc-200 focus:border-amber-500 focus:outline-none"
-              >
-                <option value="payhere">PayHere (sandbox/live)</option>
-                <option value="mock">Mock (development)</option>
-              </select>
-            </label>
-          )}
-        </div>
-
-        {gatewayError && (
-          <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300">
-            {gatewayError}
+        {providers.length > 1 && (
+          <div className="mt-4 flex items-center gap-2 text-xs font-mono text-zinc-400">
+            <label htmlFor="provider">Pay with:</label>
+            <select
+              id="provider"
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              className="rounded-md border border-white/10 bg-zinc-950 px-2 py-1 text-zinc-200"
+            >
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                  {p.sandbox ? " [test mode]" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {providers.length === 1 && providers[0].sandbox && (
+          <p className="mt-3 text-[11px] font-mono text-amber-400">
+            Test mode: {providers[0].label}. No real money is charged.
+          </p>
+        )}
+        {error && (
+          <div className="mt-4 rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
+            {error}
           </div>
         )}
       </div>
@@ -135,9 +149,9 @@ export default function TopUp() {
                 {/* Price & Checkout CTA */}
                 <div className="mt-8 pt-5 border-t border-white/5">
                   <div className="flex items-center justify-between mb-4">
-                    <span className="text-xs text-zinc-400">Price ({bundle.currency || "USD"}):</span>
+                    <span className="text-xs text-zinc-400">Price ({bundle.currency}):</span>
                     <span className="text-lg font-bold font-mono text-zinc-100">
-                      {((bundle.fiatAmountMinor || 0) / 100).toFixed(2)}
+                      {(bundle.fiatAmountMinor / 100).toFixed(2)}
                     </span>
                   </div>
 
@@ -169,13 +183,13 @@ export default function TopUp() {
           <span>Payment Security & Fair Play Policy</span>
         </div>
         <p>
-          1. <strong>Authoritative Server Fulfillment:</strong> Real Coins are authoritatively minted in your wallet only after the payment gateway's cryptographic checksum is verified and the amount/currency match the immutable order snapshot. Redirect URLs never grant currency.
+          1. <strong>Authoritative Server Fulfillment:</strong> Real Coins are added to your wallet only after our server verifies the signed payment confirmation from the payment provider. Returning to this site from the payment page never grants currency.
         </p>
         <p>
-          2. <strong>Zero Card Exposure:</strong> All card credentials and transactions are handled on PayHere's PCI-DSS hosted checkout pages. Railbound servers never process or store raw payment details.
+          2. <strong>Zero Card Exposure:</strong> Card details are entered on the payment provider's own hosted page. Railbound servers never see or store card numbers.
         </p>
         <p>
-          3. <strong>Single-Credit Guarantee:</strong> Unique provider-event and ledger reference constraints prevent double-crediting on network retries, replayed callbacks or duplicate payments.
+          3. <strong>Single-Credit Guarantee:</strong> Compound uniqueness constraints prevent double-crediting on network retries or replayed webhooks.
         </p>
       </div>
     </div>

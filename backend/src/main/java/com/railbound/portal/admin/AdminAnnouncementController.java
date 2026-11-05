@@ -17,9 +17,11 @@ import java.util.List;
 public class AdminAnnouncementController {
 
     private final AnnouncementService announcementService;
+    private final com.railbound.portal.audit.AuditService auditService;
 
-    public AdminAnnouncementController(AnnouncementService announcementService) {
+    public AdminAnnouncementController(AnnouncementService announcementService, com.railbound.portal.audit.AuditService auditService) {
         this.announcementService = announcementService;
+        this.auditService = auditService;
     }
 
     @GetMapping
@@ -39,6 +41,8 @@ public class AdminAnnouncementController {
     @PostMapping("/{id}/publish")
     @Operation(summary = "Admin publish announcement to game feed and web portal")
     public ResponseEntity<Announcement> publish(@PathVariable String id) {
-        return ResponseEntity.ok(announcementService.publishAnnouncement(id));
+        Announcement published = announcementService.publishAnnouncement(id);
+        auditService.record(SecurityUtils.getCurrentUserId(), "ANNOUNCEMENT_PUBLISHED", id, "SUCCESS", null);
+        return ResponseEntity.ok(published);
     }
 }

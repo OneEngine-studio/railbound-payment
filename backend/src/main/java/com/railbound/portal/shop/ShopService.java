@@ -5,7 +5,6 @@ import com.railbound.portal.common.InvalidStateException;
 import com.railbound.portal.common.ResourceNotFoundException;
 import com.railbound.portal.inventory.InventoryEntitlement;
 import com.railbound.portal.inventory.InventoryEntitlementRepository;
-import com.railbound.portal.outbox.OutboxService;
 import com.railbound.portal.wallet.Wallet;
 import com.railbound.portal.wallet.WalletService;
 import org.slf4j.Logger;
@@ -27,19 +26,16 @@ public class ShopService {
     private final ShopPurchaseRepository purchaseRepository;
     private final InventoryEntitlementRepository entitlementRepository;
     private final WalletService walletService;
-    private final OutboxService outboxService;
 
     public ShopService(
             ShopItemRepository itemRepository,
             ShopPurchaseRepository purchaseRepository,
             InventoryEntitlementRepository entitlementRepository,
-            WalletService walletService,
-            OutboxService outboxService) {
+            WalletService walletService) {
         this.itemRepository = itemRepository;
         this.purchaseRepository = purchaseRepository;
         this.entitlementRepository = entitlementRepository;
         this.walletService = walletService;
-        this.outboxService = outboxService;
     }
 
     public List<ShopItem> getPublishedItems(ItemCategory category) {
@@ -107,20 +103,6 @@ public class ShopService {
         // 3. Record purchase audit
         ShopPurchase purchase = new ShopPurchase(purchaseId, userId, itemSku, item.getRealCoinPrice(), idempotencyKey);
         purchaseRepository.save(purchase);
-
-        // 4. Emit the player-facing event inside the same transaction. If the
-        //    debit/entitlement above rolls back, this outbox row disappears too.
-        outboxService.enqueue(
-                OutboxService.PURCHASE_COMPLETED,
-                "shop_purchase",
-                purchaseId,
-                Map.of(
-                        "userId", userId,
-                        "itemSku", itemSku,
-                        "coinsSpent", item.getRealCoinPrice(),
-                        "balance", wallet.getRealCoins()
-                )
-        );
 
         log.info("Successfully executed purchase {} of item {} for user {}. Spent: {}, New Balance: {}",
                 purchaseId, itemSku, userId, item.getRealCoinPrice(), wallet.getRealCoins());

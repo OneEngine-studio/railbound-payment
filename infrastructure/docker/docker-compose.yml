@@ -26,21 +26,16 @@ services:
     environment:
       - SERVER_PORT=8080
       - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27018/railbound_portal?replicaSet=rs0
-      - JWT_SECRET=${JWT_SECRET:-railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal}
-      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-svc_internal_railbound_secret_key_8829}
-      - CORS_ALLOWED_ORIGIN_PATTERNS=${CORS_ALLOWED_ORIGIN_PATTERNS:-http://localhost:3000,http://127.0.0.1:3000}
-      # PayHere requires a public HTTPS notify URL. Override these in .env /
-      # your deployment secret manager; localhost will not receive callbacks.
-      - PAYMENT_PUBLIC_BASE_URL=${PAYMENT_PUBLIC_BASE_URL:-http://localhost:8080}
-      - PAYMENT_FRONTEND_BASE_URL=${PAYMENT_FRONTEND_BASE_URL:-http://localhost:3000}
-      - PAYMENT_DEFAULT_PROVIDER=${PAYMENT_DEFAULT_PROVIDER:-payhere}
+      - APP_JWT_SECRET=railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal
+      - APP_INTERNAL_SERVICE_KEY=svc_internal_railbound_secret_key_8829
+      - LOG_FILE=/tmp/backend.log
+      # Payment (override with real values; see docs/PAYHERE_SETUP.md)
+      - PAYHERE_ENABLED=${PAYHERE_ENABLED:-false}
+      - PAYHERE_SANDBOX=${PAYHERE_SANDBOX:-true}
       - PAYHERE_MERCHANT_ID=${PAYHERE_MERCHANT_ID:-}
       - PAYHERE_MERCHANT_SECRET=${PAYHERE_MERCHANT_SECRET:-}
-      - PAYHERE_APP_ID=${PAYHERE_APP_ID:-}
-      - PAYHERE_APP_SECRET=${PAYHERE_APP_SECRET:-}
-      - PAYHERE_SANDBOX=${PAYHERE_SANDBOX:-true}
-      - PAYHERE_CURRENCY=${PAYHERE_CURRENCY:-USD}
-      - APP_PAYMENT_MOCK_ENABLED=${APP_PAYMENT_MOCK_ENABLED:-false}
+      - PAYHERE_NOTIFY_URL=${PAYHERE_NOTIFY_URL:-}
+      - NAKAMA_SESSION_ENCRYPTION_KEY=${NAKAMA_SESSION_ENCRYPTION_KEY:-}
     depends_on:
       mongodb:
         condition: service_healthy
@@ -53,8 +48,6 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8080/api/v1}
-      - NEXT_PUBLIC_PAYMENT_PROVIDER=${NEXT_PUBLIC_PAYMENT_PROVIDER:-payhere}
-      - NEXT_PUBLIC_ENABLE_MOCK_PAYMENTS=${NEXT_PUBLIC_ENABLE_MOCK_PAYMENTS:-false}
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1
     depends_on:
       - backend

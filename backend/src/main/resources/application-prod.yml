@@ -1,0 +1,33 @@
+# Activated with SPRING_PROFILES_ACTIVE=prod
+# No defaults on purpose: startup fails fast if a required secret is missing.
+spring:
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI}
+
+app:
+  jwt:
+    secret: ${JWT_SECRET}
+  internal:
+    service-key: ${INTERNAL_SERVICE_KEY}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS}
+  auth:
+    mock-token-enabled: false
+  nakama:
+    session-encryption-key: ${NAKAMA_SESSION_ENCRYPTION_KEY}
+  payment:
+    default-provider: payhere
+    frontend-base-url: ${FRONTEND_BASE_URL}
+    mock:
+      enabled: false
+    payhere:
+      enabled: true
+      sandbox: ${PAYHERE_SANDBOX:false}
+      merchant-id: ${PAYHERE_MERCHANT_ID}
+      merchant-secret: ${PAYHERE_MERCHANT_SECRET}
+      notify-url: ${PAYHERE_NOTIFY_URL}
+
+logging:
+  level:
+    com.railbound.portal: INFO

@@ -1,179 +1,180 @@
 package com.railbound.portal.payments;
 
 import com.railbound.portal.common.InvalidSignatureException;
-import com.railbound.portal.common.InvalidStateException;
-import com.railbound.portal.identity.User;
-import com.railbound.portal.identity.UserRepository;
+import com.railbound.portal.refunds.RefundCase;
+import com.railbound.portal.refunds.RefundService;
+import com.railbound.portal.refunds.RefundStatus;
 import com.railbound.portal.wallet.WalletService;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.test.context.TestPropertySource;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * End-to-end backend tests for the real PayHere adapter, exercising the same
- * code path a sandbox callback would use:
- * create order -> signed form -> verified webhook -> exactly one wallet credit.
+ * End-to-end PayHere fulfillment tests against the real service layer and MongoDB replica set
+ * (start MongoDB first, as for the other integration tests). PayHere notifications are built with
+ * the same md5sig algorithm PayHere uses, so no network access to PayHere is needed.
  */
 @SpringBootTest
+@TestPropertySource(properties = {
+        "app.payment.payhere.enabled=true",
+        "app.payment.payhere.merchant-id=" + PayHereAdapterTest.MID,
+        "app.payment.payhere.merchant-secret=" + PayHereAdapterTest.SECRET,
+        "app.payment.payhere.notify-url=" + PayHereAdapterTest.NOTIFY
+})
 class PayHerePaymentFlowTests {
 
-    @Autowired
-    private PaymentService paymentService;
+    @Autowired private PaymentService paymentService;
+    @Autowired private WalletService walletService;
+    @Autowired private RefundService refundService;
+    @Autowired private PaymentOrderRepository orderRepository;
 
-    @Autowired
-    private WalletService walletService;
+    private static final String SKU = "bundle_rc_1000"; // 1150 coins for 9.99 USD (seeded)
 
-    @Autowired
-    private UserRepository userRepository;
+    private String newUser() {
+        return "usr_test_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    }
 
-    @Autowired
-    private PayHereAdapter payHereAdapter;
+    private PaymentOrder newOrder(String userId) {
+        return paymentService.startCheckout(userId, SKU, "payhere", "idem_" + UUID.randomUUID()).order();
+    }
 
-    private String userId;
+    private String body(PaymentOrder order, String amount, String status, String paymentId) {
+        return PayHereAdapterTest.notification(PayHereAdapterTest.MID, order.getOrderId(), amount, "USD", status, paymentId);
+    }
 
-    @BeforeEach
-    void setUp() {
-        userId = "usr_ph_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        userRepository.save(new User(userId, "nakama_" + userId, "PayHere Tester", "PLAYER"));
-        walletService.getOrCreateWallet(userId);
+    private long balance(String userId) {
+        return walletService.getOrCreateWallet(userId).getRealCoins();
+    }
+
+    private PaymentOrderStatus statusOf(PaymentOrder order) {
+        return orderRepository.findByOrderId(order.getOrderId()).orElseThrow().getStatus();
     }
 
     @Test
-    @DisplayName("PayHere checkout stores an immutable 1150 RC / 9.99 USD snapshot and a hosted bridge URL")
-    void createsPayHereCheckoutWithTrustedSnapshot() {
-        PaymentOrder order = paymentService.createCheckoutSession(
-                userId, "bundle_rc_1000", "payhere", "idem_ph_" + UUID.randomUUID());
+    void verifiedNotificationCreditsExactlyOnce() {
+        String userId = newUser();
+        PaymentOrder order = newOrder(userId);
+        assertThat(order.getProvider()).isEqualTo("payhere");
 
-        assertEquals("payhere", order.getProvider());
-        assertEquals(1150, order.getCoinsToCredit());
-        assertEquals(999, order.getAmountMinor());
-        assertEquals("USD", order.getCurrency());
-        assertNotNull(order.getCheckoutToken());
-        assertTrue(order.getCheckoutUrl().contains("/checkout/hosted?orderId="),
-                "Frontend must serve the auto-submit page so PayHere sees the registered domain");
+        paymentService.processWebhook("payhere", body(order, "9.99", "2", "pay_1"), null);
+        assertThat(balance(userId)).isEqualTo(1150L);
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.COMPLETED);
 
-        PaymentService.HostedCheckout hosted =
-                paymentService.prepareHostedCheckout(order.getOrderId(), order.getCheckoutToken());
-
-        assertTrue(hosted.requiresFormPost());
-        assertEquals("https://sandbox.payhere.lk/pay/checkout", hosted.actionUrl());
-        assertEquals("1211149", hosted.formFields().get("merchant_id"));
-        assertEquals("9.99", hosted.formFields().get("amount"));
-        assertEquals("USD", hosted.formFields().get("currency"));
-        assertEquals(order.getOrderId(), hosted.formFields().get("order_id"));
-        assertTrue(hosted.formFields().get("notify_url").endsWith("/api/v1/payments/webhooks/payhere"));
-        assertEquals(
-                payHereAdapter.computeCheckoutHash(order.getOrderId(), "9.99", "USD"),
-                hosted.formFields().get("hash"));
+        // exact retry (same payment + status) and a second success for the same order: no extra credit
+        paymentService.processWebhook("payhere", body(order, "9.99", "2", "pay_1"), null);
+        paymentService.processWebhook("payhere", body(order, "9.99", "2", "pay_2"), null);
+        assertThat(balance(userId)).isEqualTo(1150L);
+        assertThat(walletService.verifyLedgerInvariant(userId)).isTrue();
     }
 
     @Test
-    @DisplayName("PayHere success callback credits exactly 1150 RC and retries cannot double-credit")
-    void creditsExactlyOnceAndDeduplicates() {
-        PaymentOrder order = paymentService.createCheckoutSession(
-                userId, "bundle_rc_1000", "payhere", "idem_ph_" + UUID.randomUUID());
+    void forgedNotificationCreditsNothing() {
+        String userId = newUser();
+        PaymentOrder order = newOrder(userId);
+        String forged = body(order, "9.99", "2", "pay_x").replaceAll("md5sig=[0-9A-Fa-f]+", "md5sig=" + "0".repeat(32));
 
-        String paymentId = "32002507" + UUID.randomUUID().toString().replace("-", "").substring(0, 6);
-        Map<String, String> params = payHereCallback(order, "2", "9.99", "USD", paymentId);
-
-        assertTrue(paymentService.processWebhook("payhere", "", Map.of(), params));
-        assertEquals(1150, walletService.getWalletByUserId(userId).getRealCoins());
-        assertTrue(walletService.verifyLedgerInvariant(userId));
-
-        PaymentOrder completed = paymentService.getOrderForUser(order.getOrderId(), userId);
-        assertEquals(PaymentOrderStatus.COMPLETED, completed.getStatus());
-        assertEquals(paymentId, completed.getProviderPaymentId());
-
-        // Exact provider retry: same payment_id + status_code -> deduplicated.
-        assertTrue(paymentService.processWebhook("payhere", "", Map.of(), params));
-        assertEquals(1150, walletService.getWalletByUserId(userId).getRealCoins());
-
-        // A different payment_id for the same order must also not credit twice.
-        Map<String, String> secondPayment = payHereCallback(
-                order, "2", "9.99", "USD", paymentId + "9");
-        assertTrue(paymentService.processWebhook("payhere", "", Map.of(), secondPayment));
-        assertEquals(1150, walletService.getWalletByUserId(userId).getRealCoins());
-        assertTrue(walletService.verifyLedgerInvariant(userId));
+        assertThatThrownBy(() -> paymentService.processWebhook("payhere", forged, null))
+                .isInstanceOf(InvalidSignatureException.class);
+        assertThat(balance(userId)).isZero();
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.PENDING);
     }
 
     @Test
-    @DisplayName("A correctly signed callback with the wrong amount is rejected")
-    void rejectsWrongAmount() {
-        PaymentOrder order = paymentService.createCheckoutSession(
-                userId, "bundle_rc_1000", "payhere", "idem_ph_" + UUID.randomUUID());
+    void wrongAmountIsParkedForReviewAndNeverCredited() {
+        String userId = newUser();
+        PaymentOrder order = newOrder(userId);
 
-        // The signature is valid for 1.00, but the order snapshot is 9.99.
-        Map<String, String> params = payHereCallback(
-                order, "2", "1.00", "USD", "999" + UUID.randomUUID());
+        paymentService.processWebhook("payhere", body(order, "1.00", "2", "pay_cheap"), null);
+        assertThat(balance(userId)).isZero();
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.REVIEW_REQUIRED);
 
-        assertThrows(InvalidStateException.class, () ->
-                paymentService.processWebhook("payhere", "", Map.of(), params));
-        assertEquals(0, walletService.getWalletByUserId(userId).getRealCoins());
+        // a human verified the real payment in the PayHere dashboard and approves it
+        paymentService.resolveReview(order.getOrderId(), true, "Checked in PayHere dashboard", "usr_admin_test");
+        assertThat(balance(userId)).isEqualTo(1150L);
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.COMPLETED);
     }
 
     @Test
-    @DisplayName("A correctly signed callback with the wrong currency is rejected")
-    void rejectsWrongCurrency() {
-        PaymentOrder order = paymentService.createCheckoutSession(
-                userId, "bundle_rc_1000", "payhere", "idem_ph_" + UUID.randomUUID());
+    void paymentAfterCancelOrFailureStillCredits() {
+        String userId = newUser();
+        PaymentOrder order = newOrder(userId);
 
-        Map<String, String> params = payHereCallback(
-                order, "2", "9.99", "EUR", "998" + UUID.randomUUID());
+        paymentService.processWebhook("payhere", body(order, "9.99", "-2", "pay_try1"), null);
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.FAILED);
+        assertThat(balance(userId)).isZero();
 
-        assertThrows(InvalidStateException.class, () ->
-                paymentService.processWebhook("payhere", "", Map.of(), params));
-        assertEquals(0, walletService.getWalletByUserId(userId).getRealCoins());
+        paymentService.processWebhook("payhere", body(order, "9.99", "2", "pay_try2"), null);
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.COMPLETED);
+        assertThat(balance(userId)).isEqualTo(1150L);
     }
 
     @Test
-    @DisplayName("A forged PayHere md5sig is rejected with no state change")
-    void rejectsForgedSignature() {
-        PaymentOrder order = paymentService.createCheckoutSession(
-                userId, "bundle_rc_1000", "payhere", "idem_ph_" + UUID.randomUUID());
+    void hostedFormRequiresTheOneTimeCheckoutToken() {
+        String userId = newUser();
+        CheckoutStart start = paymentService.startCheckout(userId, SKU, "payhere", "idem_" + UUID.randomUUID());
+        String url = start.checkoutUrl();
+        assertThat(url).contains("/checkout/pay?orderId=" + start.order().getOrderId());
+        String token = url.substring(url.indexOf("ct=") + 3);
 
-        Map<String, String> params = payHereCallback(
-                order, "2", "9.99", "USD", "997" + UUID.randomUUID());
-        params.put("md5sig", "00000000000000000000000000000000");
+        BillingDetails billing = new BillingDetails("Kasun", "Perera", "kasun@example.com", "0771234567", "12 Galle Rd", "Colombo", "Sri Lanka");
 
-        assertThrows(InvalidSignatureException.class, () ->
-                paymentService.processWebhook("payhere", "", Map.of(), params));
-        assertEquals(0, walletService.getWalletByUserId(userId).getRealCoins());
+        HostedForm form = paymentService.buildHostedForm(start.order().getOrderId(), token, billing);
+        assertThat(form.fields().get("amount")).isEqualTo("9.99");
+        assertThat(form.fields().get("hash"))
+                .isEqualTo(PayHereSignatures.checkoutHash(PayHereAdapterTest.MID, start.order().getOrderId(), 999, "USD", PayHereAdapterTest.SECRET));
+
+        assertThatThrownBy(() -> paymentService.buildHostedForm(start.order().getOrderId(), "wrong-token", billing))
+                .isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> paymentService.buildHostedForm(start.order().getOrderId(), null, billing))
+                .isInstanceOf(AccessDeniedException.class);
     }
 
     @Test
-    @DisplayName("Pending/cancelled callbacks never credit coins")
-    void nonPaidOutcomesDoNotCredit() {
-        PaymentOrder cancelled = paymentService.createCheckoutSession(
-                userId, "bundle_rc_500", "payhere", "idem_ph_" + UUID.randomUUID());
-        Map<String, String> cancelledParams = payHereCallback(
-                cancelled, "-1", "4.99", "USD", "996" + UUID.randomUUID());
+    void refundReversesCoinsAndKeepsLedgerBalanced() {
+        String userId = newUser();
+        PaymentOrder order = newOrder(userId);
+        paymentService.processWebhook("payhere", body(order, "9.99", "2", "pay_r"), null);
 
-        assertTrue(paymentService.processWebhook("payhere", "", Map.of(), cancelledParams));
-        assertEquals(PaymentOrderStatus.CANCELLED,
-                paymentService.getOrderForUser(cancelled.getOrderId(), userId).getStatus());
-        assertEquals(0, walletService.getWalletByUserId(userId).getRealCoins());
+        RefundCase refund = refundService.createRefund(order.getOrderId(), "Customer request", "usr_admin_test");
+        assertThat(refund.getStatus()).isEqualTo(RefundStatus.COINS_REVERSED);
+        assertThat(balance(userId)).isZero();
+        assertThat(walletService.verifyLedgerInvariant(userId)).isTrue();
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.REFUND_PENDING);
+
+        RefundCase done = refundService.markProviderRefunded(refund.getRefundId(), "PH-REFUND-1", "usr_admin_test");
+        assertThat(done.getStatus()).isEqualTo(RefundStatus.COMPLETED);
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.REFUNDED);
     }
 
-    private Map<String, String> payHereCallback(PaymentOrder order, String statusCode,
-                                                String amount, String currency, String paymentId) {
-        Map<String, String> params = new LinkedHashMap<>();
-        params.put("merchant_id", "1211149");
-        params.put("order_id", order.getOrderId());
-        params.put("payment_id", paymentId);
-        params.put("payhere_amount", amount);
-        params.put("payhere_currency", currency);
-        params.put("status_code", statusCode);
-        params.put("method", "VISA");
-        params.put("md5sig", payHereAdapter.computeNotificationSignature(
-                order.getOrderId(), amount, currency, statusCode));
-        return params;
+    @Test
+    void refundNeverCreatesNegativeBalance() {
+        String userId = newUser();
+        PaymentOrder order = newOrder(userId);
+        paymentService.processWebhook("payhere", body(order, "9.99", "2", "pay_s"), null);
+        walletService.debitRealCoins(userId, 450, "TEST", "spend_" + UUID.randomUUID(), "player spent coins");
+
+        RefundCase refund = refundService.createRefund(order.getOrderId(), "Customer request", "usr_admin_test");
+        assertThat(refund.getStatus()).isEqualTo(RefundStatus.NEEDS_REVIEW);
+        assertThat(balance(userId)).isEqualTo(700L); // untouched, never negative
+        assertThat(walletService.verifyLedgerInvariant(userId)).isTrue();
+    }
+
+    @Test
+    void chargebackReversesCoinsAutomatically() {
+        String userId = newUser();
+        PaymentOrder order = newOrder(userId);
+        paymentService.processWebhook("payhere", body(order, "9.99", "2", "pay_c"), null);
+        paymentService.processWebhook("payhere", body(order, "9.99", "-3", "pay_c"), null);
+
+        assertThat(statusOf(order)).isEqualTo(PaymentOrderStatus.CHARGED_BACK);
+        assertThat(balance(userId)).isZero();
+        assertThat(walletService.verifyLedgerInvariant(userId)).isTrue();
     }
 }

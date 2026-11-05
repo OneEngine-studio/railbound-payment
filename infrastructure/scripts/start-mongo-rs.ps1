@@ -25,3 +25,17 @@ if ($testConn.TcpTestSucceeded) {
     Start-Sleep -Seconds 3
     Write-Host "[MongoDB RS] mongod started."
 }
+
+# One-time replica set initiation (idempotent). Without it the backend cannot start:
+# the driver reports REPLICA_SET_GHOST and times out waiting for a primary.
+Write-Host "[MongoDB RS] Ensuring replica set '$ReplSetName' is initiated..."
+$mongosh = Get-Command mongosh -ErrorAction SilentlyContinue
+if ($mongosh) {
+    $initScript = "try { rs.status().ok } catch (e) { rs.initiate({_id:'$ReplSetName',members:[{_id:0,host:'127.0.0.1:$Port'}]}).ok }"
+    & $mongosh.Source --quiet --port $Port --eval $initScript | Out-Host
+    Start-Sleep -Seconds 5
+} else {
+    Write-Host "[MongoDB RS] mongosh was not found on PATH, so the replica set was not initiated automatically."
+    Write-Host "             Run this once (see docs/PAYHERE_SETUP.md or the project README):"
+    Write-Host "             mongosh --port $Port --eval `"rs.initiate({_id:'$ReplSetName',members:[{_id:0,host:'127.0.0.1:$Port'}]})`""
+}

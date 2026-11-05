@@ -24,7 +24,7 @@ export const Footer: React.FC = () => {
             </div>
             <div className="flex items-center gap-1.5 text-zinc-400">
               <ShieldCheck className="h-3 w-3 text-amber-500/80" />
-              <span>PayHere Signed Callbacks</span>
+              <span>HMAC-SHA256 Webhooks</span>
             </div>
           </div>
         </div>

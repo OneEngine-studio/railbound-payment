@@ -3,9 +3,7 @@ import { useRouter } from "next/router";
 import Link from "next/link";
 import { api } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
-import { CheckCircle2, Clock, AlertTriangle, Coins, Ban } from "lucide-react";
-
-const MAX_POLLS = 200; // ~5 minutes at 1.5s intervals
+import { CheckCircle2, Clock, AlertTriangle, ArrowRight, Coins } from "lucide-react";
 
 export default function CheckoutReturn() {
   const router = useRouter();
@@ -13,58 +11,48 @@ export default function CheckoutReturn() {
   const { refreshWallet, wallet } = useAuth();
 
   const [order, setOrder] = useState<any | null>(null);
-  const [status, setStatus] = useState<"PROCESSING" | "COMPLETED" | "FAILED" | "CANCELLED">("PROCESSING");
+  const [status, setStatus] = useState<"PROCESSING" | "COMPLETED" | "FAILED" | "REVIEW" | "TIMEOUT">("PROCESSING");
   const [pollCount, setPollCount] = useState(0);
 
   useEffect(() => {
-    if (!router.isReady) return;
-    if (cancelled === "1") {
-      setStatus("CANCELLED");
-      return;
-    }
     if (!orderId) return;
 
     let isMounted = true;
-    let done = false;
-
-    const check = async () => {
-      if (done) return;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 120; // about 3 minutes at 1.5s per poll
+    const interval = setInterval(async () => {
+      attempts += 1;
       try {
         const data = await api.getOrder(orderId as string);
         if (!isMounted) return;
-        setOrder(data);
 
+        setOrder(data);
         if (data.status === "COMPLETED") {
-          done = true;
           setStatus("COMPLETED");
           await refreshWallet();
+          clearInterval(interval);
         } else if (data.status === "FAILED" || data.status === "CANCELLED" || data.status === "EXPIRED") {
-          done = true;
-          setStatus(data.status === "CANCELLED" ? "CANCELLED" : "FAILED");
-        } else if (data.status === "REFUND_PENDING" || data.status === "REFUNDED") {
-          done = true;
           setStatus("FAILED");
+          clearInterval(interval);
+        } else if (data.status === "REVIEW_REQUIRED") {
+          setStatus("REVIEW");
+          clearInterval(interval);
+        } else if (attempts >= MAX_ATTEMPTS) {
+          setStatus("TIMEOUT");
+          clearInterval(interval);
+        } else {
+          setPollCount((prev) => prev + 1);
         }
       } catch (err) {
         console.warn("Polling order status error:", err);
       }
-    };
-
-    check();
-    const interval = setInterval(() => {
-      if (done) {
-        clearInterval(interval);
-        return;
-      }
-      setPollCount((prev) => Math.min(prev + 1, MAX_POLLS));
-      check();
     }, 1500);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [orderId, cancelled, router.isReady]);
+  }, [orderId]);
 
   return (
     <div className="mx-auto max-w-md px-4 py-20 sm:px-6">
@@ -75,24 +63,16 @@ export default function CheckoutReturn() {
               <Clock className="h-7 w-7" />
             </div>
             <h1 className="text-lg font-bold text-zinc-100">
-              {pollCount >= MAX_POLLS ? "Payment Still Processing" : "Verifying Payment Callback..."}
+              {cancelled ? "Checking your payment..." : "Confirming your payment..."}
             </h1>
             <p className="mt-2 text-xs text-zinc-400 leading-relaxed">
-              {pollCount >= MAX_POLLS
-                ? "PayHere has not confirmed the payment yet. Coins are only credited after a verified server callback. You can safely close this page and check your wallet later."
-                : "Awaiting the authoritative server-to-server confirmation from PayHere. Closing the browser does not cancel a successful payment."}
+              {cancelled
+                ? "You left the payment page. If you did not complete a payment, this order will be cancelled shortly."
+                : "Waiting for the payment provider to confirm your payment to our server. This usually takes a few seconds."}
             </p>
-            <div className="mt-6 rounded-md bg-zinc-950 p-3 text-[11px] font-mono text-zinc-500 break-all">
+            <div className="mt-6 rounded-md bg-zinc-950 p-3 text-[11px] font-mono text-zinc-500">
               Order: {orderId || "Resolving..."} (Poll cycle: {pollCount})
             </div>
-            {pollCount >= MAX_POLLS && (
-              <Link
-                href="/wallet"
-                className="mt-6 inline-flex rounded-lg bg-zinc-800 px-4 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
-              >
-                Check Wallet
-              </Link>
-            )}
           </div>
         )}
 
@@ -104,7 +84,7 @@ export default function CheckoutReturn() {
 
             <h1 className="text-xl font-bold text-zinc-100">Payment Verified & Coins Credited!</h1>
             <p className="mt-2 text-xs text-zinc-400">
-              The PayHere callback was cryptographically verified and atomically fulfilled exactly once.
+              The payment gateway callback has been cryptographically confirmed and atomically fulfilled.
             </p>
 
             {order && (
@@ -115,20 +95,8 @@ export default function CheckoutReturn() {
                 </div>
                 <div className="flex justify-between text-zinc-400">
                   <span>Amount Paid:</span>
-                  <span className="text-zinc-200">
-                    {(order.amountMinor / 100).toFixed(2)} {order.currency}
-                  </span>
+                  <span className="text-zinc-200">{(order.amountMinor / 100).toFixed(2)} {order.currency}</span>
                 </div>
-                <div className="flex justify-between text-zinc-400">
-                  <span>Gateway:</span>
-                  <span className="text-zinc-200 uppercase">{order.provider}</span>
-                </div>
-                {order.providerPaymentId && (
-                  <div className="flex justify-between text-zinc-400">
-                    <span>Payment Ref:</span>
-                    <span className="text-zinc-200 break-all">{order.providerPaymentId}</span>
-                  </div>
-                )}
                 <div className="flex justify-between text-zinc-400">
                   <span>New Authoritative Balance:</span>
                   <span className="font-bold text-emerald-400">{wallet?.realCoins.toLocaleString()} RC</span>
@@ -153,22 +121,37 @@ export default function CheckoutReturn() {
           </div>
         )}
 
-        {status === "CANCELLED" && (
+        {status === "REVIEW" && (
           <div>
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-zinc-500/10 text-zinc-400 mb-4">
-              <Ban className="h-8 w-8" />
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 text-amber-400 mb-4">
+              <AlertTriangle className="h-8 w-8" />
             </div>
-            <h1 className="text-lg font-bold text-zinc-100">Checkout Cancelled</h1>
+            <h1 className="text-lg font-bold text-amber-200">Payment Under Review</h1>
             <p className="mt-2 text-xs text-zinc-400">
-              No payment was taken. Your Real Coin balance is unchanged.
+              We received your payment but it needs a quick manual check before the coins are added. Please contact support and quote this order ID.
             </p>
+            <div className="mt-6 rounded-md bg-zinc-950 p-3 text-[11px] font-mono text-zinc-500 break-all">Order: {orderId}</div>
             <div className="mt-6">
-              <Link
-                href="/top-up"
-                className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-800 px-4 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
-              >
-                Try Again
+              <Link href="/support" className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-800 px-4 py-2 text-xs text-zinc-200 hover:bg-zinc-700">
+                Contact Support
               </Link>
+            </div>
+          </div>
+        )}
+
+        {status === "TIMEOUT" && (
+          <div>
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 text-amber-400 mb-4">
+              <Clock className="h-7 w-7" />
+            </div>
+            <h1 className="text-lg font-bold text-zinc-100">Still Waiting For Confirmation</h1>
+            <p className="mt-2 text-xs text-zinc-400">
+              We have not received the payment confirmation yet. If you completed the payment, your coins will appear in your wallet automatically once it arrives. You do not need to pay again.
+            </p>
+            <div className="mt-6 rounded-md bg-zinc-950 p-3 text-[11px] font-mono text-zinc-500 break-all">Order: {orderId}</div>
+            <div className="mt-6 flex items-center justify-center gap-3">
+              <Link href="/wallet" className="rounded-lg bg-zinc-800 px-4 py-2 text-xs text-zinc-200 hover:bg-zinc-700">Check Wallet</Link>
+              <Link href="/support" className="rounded-lg border border-white/10 px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-900">Contact Support</Link>
             </div>
           </div>
         )}
@@ -178,23 +161,18 @@ export default function CheckoutReturn() {
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-rose-500/10 text-rose-400 mb-4">
               <AlertTriangle className="h-8 w-8" />
             </div>
-            <h1 className="text-lg font-bold text-rose-200">Payment Fulfillment Failed</h1>
+            <h1 className="text-lg font-bold text-rose-200">
+              {order?.status === "CANCELLED" || cancelled ? "Payment Cancelled" : "Payment Not Completed"}
+            </h1>
             <p className="mt-2 text-xs text-zinc-400">
-              The payment was declined, expired, cancelled, or the callback was rejected. No coins were
-              credited. If your card was charged, contact support with the order reference.
+              {order?.statusMessage || "The payment was cancelled, failed or expired. No coins were added and you were not charged for this order."}
             </p>
-            <div className="mt-6 flex items-center justify-center gap-3">
+            <div className="mt-6">
               <Link
                 href="/top-up"
                 className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-800 px-4 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
               >
                 Try Again
-              </Link>
-              <Link
-                href="/support"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-800"
-              >
-                Contact Support
               </Link>
             </div>
           </div>

@@ -1,96 +1,34 @@
 package com.railbound.portal.payments;
 
-import java.util.Map;
-
 /**
- * Provider-agnostic boundary for hosted checkout + server callback handling.
- *
- * <p>Business rules (wallet credit, ledger, idempotency) deliberately live in
- * {@link PaymentService}; an adapter must never mutate wallets. This keeps the
- * wallet logic identical no matter which gateway is used.</p>
- *
- * <p>Security rule: adapters that accept callbacks must verify the provider's
- * own signature scheme on the raw request before returning a
- * {@link PaymentNotification}. A client-reported "success" must never become a
- * notification.</p>
+ * Boundary between our wallet/order logic and a concrete payment provider. Adding a provider means
+ * adding one implementation of this interface plus a line in PaymentService#getAdapter; nothing in
+ * the wallet or ledger code changes.
  */
 public interface PaymentGatewayAdapter {
 
-    /** Stable lowercase provider identifier used in URLs and persisted orders. */
+    /** Lower-case provider id stored on orders, e.g. "payhere" or "mock". */
     String getProviderName();
 
-    /**
-     * True when the provider is enabled and has the minimum credentials needed to
-     * create a checkout session. A disabled/unconfigured provider must fail loudly
-     * instead of silently falling back to a mock.
-     */
-    boolean isConfigured();
-
-    CheckoutSessionResult createCheckoutSession(PaymentOrder order, CheckoutContext context);
+    /** False when the provider is switched off or not fully configured. */
+    boolean isEnabled();
 
     /**
-     * Verifies the provider signature and normalizes the callback.
+     * Prepares provider-side state for a new checkout.
      *
-     * @throws com.railbound.portal.common.InvalidSignatureException when the
-     *         callback cannot be cryptographically authenticated.
+     * @param order         the persisted order (amount/currency snapshot is already final)
+     * @param checkoutToken one-time bearer secret that authorizes opening the hosted checkout page
      */
-    PaymentNotification verifyAndParseNotification(WebhookRequest request);
+    CheckoutSessionResult createCheckoutSession(PaymentOrder order, String checkoutToken);
 
     /**
-     * Context needed by real gateways. Customer fields are only used to pre-fill
-     * the gateway's hosted page; they are never persisted with payment records.
+     * Verifies the provider's signature over the exact raw request body and converts it to a
+     * provider-neutral event.
+     *
+     * @throws com.railbound.portal.common.InvalidSignatureException when the notification is not
+     *         genuinely from the provider
      */
-    record CheckoutContext(
-            String returnUrl,
-            String cancelUrl,
-            String notifyUrl,
-            String customerFirstName,
-            String customerLastName,
-            String customerEmail,
-            String customerPhone,
-            String customerAddress,
-            String customerCity,
-            String customerCountry
-    ) {}
+    WebhookEvent verifyAndParseWebhook(String rawBody, String signatureHeader);
 
-    /**
-     * @param providerSessionId provider-side session/payment reference when one exists
-     * @param checkoutUrl       direct hosted URL, or the gateway form action URL
-     * @param formFields        non-empty when the gateway requires an HTML form POST
-     */
-    record CheckoutSessionResult(
-            String providerSessionId,
-            String checkoutUrl,
-            Map<String, String> formFields
-    ) {
-        public boolean requiresFormPost() {
-            return formFields != null && !formFields.isEmpty();
-        }
-    }
-
-    /**
-     * Raw callback data. PayHere sends form-encoded data, while other providers
-     * may send JSON; adapters decide how to parse and verify.
-     */
-    record WebhookRequest(
-            String rawBody,
-            Map<String, String> headers,
-            Map<String, String> formParams
-    ) {
-        public String header(String name) {
-            if (headers == null || name == null) {
-                return null;
-            }
-            for (Map.Entry<String, String> entry : headers.entrySet()) {
-                if (name.equalsIgnoreCase(entry.getKey())) {
-                    return entry.getValue();
-                }
-            }
-            return null;
-        }
-
-        public String param(String name) {
-            return formParams == null || name == null ? null : formParams.get(name);
-        }
-    }
+    record CheckoutSessionResult(String providerSessionId, String checkoutUrl) {}
 }

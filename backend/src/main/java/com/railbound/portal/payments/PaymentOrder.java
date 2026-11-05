@@ -1,5 +1,6 @@
 package com.railbound.portal.payments;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.CompoundIndex;
 import org.springframework.data.mongodb.core.index.CompoundIndexes;
@@ -29,35 +30,28 @@ public class PaymentOrder {
     private long amountMinor;
     private String currency;
 
-    private String provider; // "payhere" (default), "mock" (local development only)
+    private String provider; // "payhere" or "mock"
 
     @Indexed(sparse = true)
     private String providerSessionId;
 
-    /**
-     * Opaque, single-use token embedded in the backend-hosted checkout bridge URL.
-     * It lets a browser/Unity open the checkout without a bearer token while
-     * preventing order enumeration.
-     */
-    @Indexed(sparse = true)
-    private String checkoutToken;
-
-    /** Stored checkout destination (backend bridge URL or mock page). */
-    private String checkoutUrl;
-
-    /** Provider payment reference used for refunds/reconciliation (PayHere payment_id). */
-    private String providerPaymentId;
-
-    /** Last raw provider status code, retained for support diagnostics. */
-    private String providerStatusCode;
-
     private PaymentOrderStatus status;
     private String idempotencyKey;
+
+    // Provider-side payment reference (PayHere payment_id), filled in by a verified notification.
+    private String providerPaymentId;
+
+    // Human readable reason for FAILED / CANCELLED / EXPIRED / REVIEW_REQUIRED, for support staff.
+    private String statusMessage;
+
+    // SHA-256 of the one-time token that authorizes opening the hosted checkout page. Only the hash
+    // is stored, and it is never serialized to API clients.
+    @JsonIgnore
+    private String checkoutTokenHash;
 
     private Instant createdAt;
     private Instant expiresAt;
     private Instant completedAt;
-    private Instant refundedAt;
 
     public PaymentOrder() {
         this.createdAt = Instant.now();
@@ -167,46 +161,6 @@ public class PaymentOrder {
         this.idempotencyKey = idempotencyKey;
     }
 
-    public String getCheckoutToken() {
-        return checkoutToken;
-    }
-
-    public void setCheckoutToken(String checkoutToken) {
-        this.checkoutToken = checkoutToken;
-    }
-
-    public String getCheckoutUrl() {
-        return checkoutUrl;
-    }
-
-    public void setCheckoutUrl(String checkoutUrl) {
-        this.checkoutUrl = checkoutUrl;
-    }
-
-    public String getProviderPaymentId() {
-        return providerPaymentId;
-    }
-
-    public void setProviderPaymentId(String providerPaymentId) {
-        this.providerPaymentId = providerPaymentId;
-    }
-
-    public String getProviderStatusCode() {
-        return providerStatusCode;
-    }
-
-    public void setProviderStatusCode(String providerStatusCode) {
-        this.providerStatusCode = providerStatusCode;
-    }
-
-    public Instant getRefundedAt() {
-        return refundedAt;
-    }
-
-    public void setRefundedAt(Instant refundedAt) {
-        this.refundedAt = refundedAt;
-    }
-
     public Instant getCreatedAt() {
         return createdAt;
     }
@@ -229,5 +183,29 @@ public class PaymentOrder {
 
     public void setCompletedAt(Instant completedAt) {
         this.completedAt = completedAt;
+    }
+    public String getProviderPaymentId() {
+        return providerPaymentId;
+    }
+
+    public void setProviderPaymentId(String providerPaymentId) {
+        this.providerPaymentId = providerPaymentId;
+    }
+
+    public String getStatusMessage() {
+        return statusMessage;
+    }
+
+    public void setStatusMessage(String statusMessage) {
+        this.statusMessage = statusMessage;
+    }
+
+    @JsonIgnore
+    public String getCheckoutTokenHash() {
+        return checkoutTokenHash;
+    }
+
+    public void setCheckoutTokenHash(String checkoutTokenHash) {
+        this.checkoutTokenHash = checkoutTokenHash;
     }
 }
