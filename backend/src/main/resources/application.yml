@@ -11,11 +11,22 @@ spring:
 
 app:
   jwt:
-    secret: "railbound-tactical-jwt-secret-key-32-chars-minimum-battle-royale-portal"
+    secret: ${JWT_SECRET}
     expiration-ms: 86400000 # 24 hours
   internal:
-    service-key: "svc_internal_railbound_secret_key_8829"
+    service-key: ${INTERNAL_SERVICE_KEY}
+  # Public address of this service, used for the page Stripe returns the player's browser to.
+  public-base-url: ${PUBLIC_BASE_URL:http://localhost:8080}
+  # Local development only: mock token, mock checkout completion, mock provider and demo accounts.
+  dev-endpoints:
+    enabled: ${APP_DEV_ENDPOINTS_ENABLED:false}
+  # The OneEngine platform API that vouches for launcher sign-ins.
+  oneengine:
+    api-url: ${ONEENGINE_API_URL:https://api.13-236-184-157.sslip.io}
   payment:
+    stripe:
+      secret-key: ${STRIPE_SECRET_KEY:}
+      webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
     mock:
       secret: "mock_webhook_secret_key_99182"
       checkout-base-url: "http://localhost:3000/checkout/hosted-mock"

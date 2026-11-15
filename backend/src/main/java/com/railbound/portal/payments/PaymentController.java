@@ -35,7 +35,7 @@ public class PaymentController {
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
                 "orderId", order.getOrderId(),
                 "status", order.getStatus().name(),
-                "checkoutUrl", "http://localhost:3000/checkout/hosted-mock?orderId=" + order.getOrderId(),
+                "checkoutUrl", order.getCheckoutUrl() == null ? "" : order.getCheckoutUrl(),
                 "bundleSku", order.getBundleSku(),
                 "coinsToCredit", order.getCoinsToCredit(),
                 "amountMinor", order.getAmountMinor(),
@@ -64,9 +64,27 @@ public class PaymentController {
     public ResponseEntity<Map<String, String>> handleWebhook(
             @PathVariable String provider,
             @RequestHeader(value = "X-Signature", required = false) String signature,
+            @RequestHeader(value = "Stripe-Signature", required = false) String stripeSignature,
             @RequestBody String rawBody) {
-        boolean success = paymentService.processWebhook(provider, rawBody, signature);
+        boolean success = paymentService.processWebhook(provider, rawBody, stripeSignature != null ? stripeSignature : signature);
         return ResponseEntity.ok(Map.of("status", success ? "PROCESSED" : "IGNORED"));
+    }
+
+    /** Where Stripe sends the player's browser afterwards: a plain page. Credit is decided by the webhook alone. */
+    @GetMapping(value = "/return", produces = "text/html;charset=UTF-8")
+    public ResponseEntity<String> checkoutReturn(@RequestParam(value = "result", defaultValue = "success") String result) {
+        boolean ok = "success".equals(result);
+        String title = ok ? "Payment received" : "Checkout cancelled";
+        String text = ok ? "Your coins arrive in the OneEngine launcher in a moment. You can close this tab."
+                : "Nothing was charged. You can close this tab and try again in the launcher.";
+        String html = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+                + "<title>" + title + "</title><body style=\"margin:0;min-height:100vh;display:grid;place-items:center;"
+                + "background:#24100F;color:#fff;font-family:system-ui,sans-serif;text-align:center\"><main><h1>" + title
+                + "</h1><p style=\"color:#d1b4b5\">" + text + "</p></main></body>";
+        return ResponseEntity.ok()
+                .header("Cache-Control", "no-store")
+                .header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+                .body(html);
     }
 
     @PostMapping("/mock-complete/{orderId}")

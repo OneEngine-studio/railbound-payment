@@ -30,13 +30,16 @@ public class DataInitializer implements CommandLineRunner {
     private final AnnouncementRepository announcementRepository;
     private final UserRepository userRepository;
     private final WalletRepository walletRepository;
+    private final DevEndpoints devEndpoints;
 
     public DataInitializer(
             CoinBundleRepository bundleRepository,
             ShopItemRepository itemRepository,
             AnnouncementRepository announcementRepository,
             UserRepository userRepository,
-            WalletRepository walletRepository) {
+            WalletRepository walletRepository,
+            DevEndpoints devEndpoints) {
+        this.devEndpoints = devEndpoints;
         this.bundleRepository = bundleRepository;
         this.itemRepository = itemRepository;
         this.announcementRepository = announcementRepository;
@@ -179,6 +182,9 @@ public class DataInitializer implements CommandLineRunner {
     }
 
     private void seedDemoUsers() {
+        if (!devEndpoints.isEnabled()) {
+            return;
+        }
         if (userRepository.count() == 0) {
             log.info("Seeding demo player and admin accounts...");
             User player = new User("usr_demo_viper_01", "00000000-0000-0000-0000-000000000001", "ViperActual", "PLAYER");
