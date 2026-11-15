@@ -41,6 +41,20 @@ public class MockPaymentAdapter implements PaymentGatewayAdapter {
     }
 
     @Override
+    public java.util.Optional<WebhookEvent> parseWebhook(com.fasterxml.jackson.databind.JsonNode payload) {
+        String orderId = payload.path("orderId").asText("");
+        if (orderId.isBlank() || !"payment.succeeded".equals(payload.path("type").asText("payment.succeeded"))) {
+            return java.util.Optional.empty();
+        }
+        return java.util.Optional.of(new WebhookEvent(
+                payload.path("eventId").asText("evt_" + UUID.randomUUID()),
+                orderId,
+                null,
+                payload.has("amountMinor") ? payload.path("amountMinor").asLong() : null,
+                payload.path("currency").asText("")));
+    }
+
+    @Override
     public boolean verifyWebhookSignature(String rawBody, String signatureHeader) {
         if (signatureHeader == null || rawBody == null) {
             return false;

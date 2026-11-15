@@ -14,6 +14,22 @@ public record SecurityUser(
         String displayName
 ) implements UserDetails {
 
+    public String getUserId() {
+        return userId;
+    }
+
+    public String getNakamaUserId() {
+        return nakamaUserId;
+    }
+
+    public String getRole() {
+        return role;
+    }
+
+    public String getDisplayName() {
+        return displayName;
+    }
+
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
         return List.of(new SimpleGrantedAuthority("ROLE_" + role));

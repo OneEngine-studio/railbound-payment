@@ -33,6 +33,7 @@ public class PaymentOrder {
 
     @Indexed(sparse = true)
     private String providerSessionId;
+    private String checkoutUrl;
 
     private PaymentOrderStatus status;
     private String idempotencyKey;
@@ -131,6 +132,14 @@ public class PaymentOrder {
 
     public void setProviderSessionId(String providerSessionId) {
         this.providerSessionId = providerSessionId;
+    }
+
+    public String getCheckoutUrl() {
+        return checkoutUrl;
+    }
+
+    public void setCheckoutUrl(String checkoutUrl) {
+        this.checkoutUrl = checkoutUrl;
     }
 
     public PaymentOrderStatus getStatus() {

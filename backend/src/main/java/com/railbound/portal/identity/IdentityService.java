@@ -32,11 +32,11 @@ public class IdentityService {
     }
 
     public String generateTokenForUser(User user) {
-        return tokenProvider.generateToken(
+        return tokenProvider.generateToken(new JwtTokenProvider.UserContext(
                 user.getUserId(),
                 user.getNakamaUserId(),
                 user.getRole(),
                 user.getDisplayName()
-        );
+        ));
     }
 }

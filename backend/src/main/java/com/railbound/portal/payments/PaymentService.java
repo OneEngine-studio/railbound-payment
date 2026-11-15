@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.railbound.portal.bundles.CoinBundle;
 import com.railbound.portal.bundles.CoinBundleService;
 import com.railbound.portal.common.InvalidSignatureException;
+import com.railbound.portal.config.DevEndpoints;
+import org.springframework.beans.factory.annotation.Value;
 import com.railbound.portal.common.InvalidStateException;
 import com.railbound.portal.common.ResourceNotFoundException;
 import com.railbound.portal.wallet.WalletService;
@@ -31,6 +33,9 @@ public class PaymentService {
     private final CoinBundleService bundleService;
     private final WalletService walletService;
     private final MockPaymentAdapter mockPaymentAdapter;
+    private final StripePaymentAdapter stripePaymentAdapter;
+    private final DevEndpoints devEndpoints;
+    private final String publicBaseUrl;
     private final ObjectMapper objectMapper;
 
     public PaymentService(
@@ -39,17 +44,27 @@ public class PaymentService {
             CoinBundleService bundleService,
             WalletService walletService,
             MockPaymentAdapter mockPaymentAdapter,
+            StripePaymentAdapter stripePaymentAdapter,
+            DevEndpoints devEndpoints,
+            @Value("${app.public-base-url}") String publicBaseUrl,
             ObjectMapper objectMapper) {
         this.orderRepository = orderRepository;
         this.eventRepository = eventRepository;
         this.bundleService = bundleService;
         this.walletService = walletService;
         this.mockPaymentAdapter = mockPaymentAdapter;
+        this.stripePaymentAdapter = stripePaymentAdapter;
+        this.devEndpoints = devEndpoints;
+        this.publicBaseUrl = publicBaseUrl.endsWith("/") ? publicBaseUrl.substring(0, publicBaseUrl.length() - 1) : publicBaseUrl;
         this.objectMapper = objectMapper;
     }
 
     public PaymentGatewayAdapter getAdapter(String providerName) {
-        if ("mock".equalsIgnoreCase(providerName)) {
+        if ("stripe".equalsIgnoreCase(providerName)) {
+            return stripePaymentAdapter;
+        }
+        // The mock provider signs with a well-known development secret, so it only exists in development.
+        if ("mock".equalsIgnoreCase(providerName) && devEndpoints.isEnabled()) {
             return mockPaymentAdapter;
         }
         throw new ResourceNotFoundException("Unsupported payment provider: " + providerName);
@@ -65,7 +80,7 @@ public class PaymentService {
         }
 
         CoinBundle bundle = bundleService.getBundleBySku(bundleSku);
-        String selectedProvider = (provider != null && !provider.isBlank()) ? provider : "mock";
+        String selectedProvider = (provider != null && !provider.isBlank()) ? provider : "stripe";
         PaymentGatewayAdapter adapter = getAdapter(selectedProvider);
 
         String orderId = "ord_" + UUID.randomUUID().toString();
@@ -85,9 +100,10 @@ public class PaymentService {
 
         PaymentGatewayAdapter.CheckoutSessionResult sessionResult = adapter.createCheckoutSession(
                 order,
-                "http://localhost:3000/checkout/return?orderId=" + orderId
+                publicBaseUrl + "/api/v1/payments/return?orderId=" + orderId
         );
         order.setProviderSessionId(sessionResult.providerSessionId());
+        order.setCheckoutUrl(sessionResult.checkoutUrl());
         return orderRepository.save(order);
     }
 
@@ -126,13 +142,14 @@ public class PaymentService {
 
         try {
             JsonNode payload = objectMapper.readTree(rawBody);
-            String eventId = payload.has("eventId") ? payload.get("eventId").asText() : "evt_" + UUID.randomUUID();
-            String orderId = payload.has("orderId") ? payload.get("orderId").asText() : null;
-            String eventType = payload.has("type") ? payload.get("type").asText() : "payment.succeeded";
-
-            if (orderId == null || orderId.isBlank()) {
-                throw new InvalidStateException("Missing orderId in webhook payload");
+            Optional<PaymentGatewayAdapter.WebhookEvent> parsed = adapter.parseWebhook(payload);
+            if (parsed.isEmpty()) {
+                // Signed, but not a successful payment we act on: acknowledge so the provider stops retrying.
+                return true;
             }
+            PaymentGatewayAdapter.WebhookEvent event = parsed.get();
+            String orderId = event.orderId();
+            String eventId = (event.eventId() == null || event.eventId().isBlank()) ? "evt_" + UUID.randomUUID() : event.eventId();
 
             if (eventRepository.existsByProviderAndProviderEventId(providerName, eventId)) {
                 log.info("Duplicate webhook event {} acknowledged without re-crediting", eventId);
@@ -146,6 +163,18 @@ public class PaymentService {
                 log.info("Order {} already completed; recording duplicate callback event", orderId);
                 eventRepository.save(new PaymentEvent(providerName, eventId, orderId, "DUPLICATE_IGNORED", rawBody));
                 return true;
+            }
+
+            // Never credit what was not paid for: amount, currency and session must match the order we created.
+            if (event.amountMinor() != null && event.amountMinor() != order.getAmountMinor()) {
+                throw new InvalidStateException("Paid amount does not match the order");
+            }
+            if (event.currency() != null && !event.currency().isBlank() && !event.currency().equalsIgnoreCase(order.getCurrency())) {
+                throw new InvalidStateException("Paid currency does not match the order");
+            }
+            if (event.providerSessionId() != null && !event.providerSessionId().isBlank() && order.getProviderSessionId() != null
+                    && !event.providerSessionId().equals(order.getProviderSessionId())) {
+                throw new InvalidStateException("Payment session does not match the order");
             }
 
             // Mark order COMPLETED
@@ -182,6 +211,7 @@ public class PaymentService {
      * Generates a signed webhook and invokes the authoritative webhook verification path.
      */
     public boolean mockCompleteOrder(String orderId) {
+        devEndpoints.require();
         PaymentOrder order = orderRepository.findByOrderId(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found: " + orderId));
 
