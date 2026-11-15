@@ -9,19 +9,20 @@ public final class SecurityUtils {
 
     public static SecurityUser getCurrentUser() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth != null && auth.getPrincipal() instanceof SecurityUser user) {
-            return user;
-        }
-        return null;
+        return auth != null && auth.getPrincipal() instanceof SecurityUser user
+            ? user
+            : null;
     }
 
     public static String getCurrentUserId() {
-        SecurityUser user = getCurrentUser();
-        return user != null ? user.getUserId() : null;
+        return Optional.ofNullable(getCurrentUser())
+            .map(SecurityUser::getUserId)
+            .orElse(null);
     }
 
     public static String getCurrentNakamaUserId() {
-        SecurityUser user = getCurrentUser();
-        return user != null ? user.getNakamaUserId() : null;
+        return Optional.ofNullable(getCurrentUser())
+            .map(SecurityUser::getNakamaUserId)
+            .orElse(null);
     }
 }
