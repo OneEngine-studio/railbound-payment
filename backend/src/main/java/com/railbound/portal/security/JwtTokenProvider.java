@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Date;
 
 @Component
@@ -28,17 +29,17 @@ public class JwtTokenProvider {
         this.expirationMs = expirationMs;
     }
 
-    public String generateToken(String userId, String nakamaUserId, String role, String displayName) {
-        Date now = new Date();
-        Date expiry = new Date(now.getTime() + expirationMs);
+    public String generateToken(UserContext userContext) {
+        Instant now = Instant.now();
+        Instant expiry = now.plusMillis(expirationMs);
 
         return Jwts.builder()
-                .subject(userId)
-                .claim("nakamaUserId", nakamaUserId)
-                .claim("role", role)
-                .claim("displayName", displayName)
-                .issuedAt(now)
-                .expiration(expiry)
+                .subject(userContext.userId())
+                .claim("nakamaUserId", userContext.nakamaUserId())
+                .claim("role", userContext.role())
+                .claim("displayName", userContext.displayName())
+                .issuedAt(Date.from(now))
+                .expiration(Date.from(expiry))
                 .signWith(secretKey)
                 .compact();
     }
@@ -55,4 +56,6 @@ public class JwtTokenProvider {
             return null;
         }
     }
+
+    public record UserContext(String userId, String nakamaUserId, String role, String displayName) {}
 }
