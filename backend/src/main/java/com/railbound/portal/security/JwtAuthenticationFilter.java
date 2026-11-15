@@ -30,31 +30,39 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             @NonNull HttpServletResponse response,
             @NonNull FilterChain filterChain) throws ServletException, IOException {
 
-        String token = resolveToken(request);
-        if (StringUtils.hasText(token)) {
+        String token = extractBearerToken(request);
+        if (token != null) {
             Claims claims = tokenProvider.validateAndGetClaims(token);
             if (claims != null) {
-                String userId = claims.getSubject();
-                String nakamaUserId = claims.get("nakamaUserId", String.class);
-                String role = claims.get("role", String.class);
-                String displayName = claims.get("displayName", String.class);
-
-                SecurityUser user = new SecurityUser(userId, nakamaUserId, role != null ? role : "PLAYER", displayName);
-                UsernamePasswordAuthenticationToken authentication =
-                        new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
-                authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                SecurityContextHolder.getContext().setAuthentication(authentication);
+                authenticate(claims, request);
             }
         }
 
         filterChain.doFilter(request, response);
     }
 
-    private String resolveToken(HttpServletRequest request) {
-        String bearerToken = request.getHeader("Authorization");
-        if (StringUtils.hasText(bearerToken) && bearerToken.startsWith("Bearer ")) {
-            return bearerToken.substring(7);
-        }
-        return null;
+    private String extractBearerToken(HttpServletRequest request) {
+        String authHeader = request.getHeader("Authorization");
+        return StringUtils.hasText(authHeader) && authHeader.startsWith("Bearer ")
+                ? authHeader.substring(7)
+                : null;
+    }
+
+    private void authenticate(Claims claims, HttpServletRequest request) {
+        String userId = claims.getSubject();
+        String nakamaUserId = claims.get("nakamaUserId", String.class);
+        String role = claims.get("role", String.class);
+        String displayName = claims.get("displayName", String.class);
+
+        var user = new SecurityUser(
+                userId,
+                nakamaUserId,
+                role != null ? role : "PLAYER",
+                displayName);
+
+        var auth = new UsernamePasswordAuthenticationToken(
+                user, null, user.getAuthorities());
+        auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+        SecurityContextHolder.getContext().setAuthentication(auth);
     }
 }
